@@ -152,6 +152,17 @@ class VisorTurismoAR:
         
         # Iniciamos la ambientación musical
         self.iniciar_musica_fondo()
+        
+        self.anim_frame = 0 # Contador para controlar tiempos de animaciones
+
+    def dibujar_sombra(self, frame, cx, cy, rx, ry):
+        """Dibuja una elipse semitransparente como sombra bajo los personajes."""
+        if rx <= 0 or ry <= 0: return
+        overlay = frame.copy()
+        # Color oscuro para la sombra (gris muy oscuro/negro)
+        cv2.ellipse(overlay, (int(cx), int(cy)), (int(rx), int(ry)), 0, 0, 360, (20, 20, 20), -1)
+        # Aplicamos transparencia (0.35 de opacidad para la sombra)
+        cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
 
     def iniciar_musica_fondo(self):
         try:
@@ -202,6 +213,21 @@ class VisorTurismoAR:
         
         if 'historica.png' in [f.lower() for f in archivos]:
             self.activos['foto_h'] = cv2.imread(os.path.join(path_sitio, 'historica.png'), cv2.IMREAD_UNCHANGED)
+
+        self.activos['mapa_img'] = None
+        self.activos['pop_up_img'] = None
+        
+        mapa_file = next((f for f in archivos if f.lower().startswith('mapa.') and f.lower().endswith(('.png', '.jpg', '.jpeg'))), None)
+        pop_up_file = next((f for f in archivos if f.lower().startswith('pop_up.') and f.lower().endswith(('.png', '.jpg', '.jpeg'))), None)
+
+        if mapa_file:
+            img = cv2.imread(os.path.join(path_sitio, mapa_file), cv2.IMREAD_UNCHANGED)
+            if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            self.activos['mapa_img'] = img
+        if pop_up_file:
+            img = cv2.imread(os.path.join(path_sitio, pop_up_file), cv2.IMREAD_UNCHANGED)
+            if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
+            self.activos['pop_up_img'] = img
             
         # Cargar textos desde textos.txt (cada linea corresponde a un paso)
         path_textos = os.path.join(path_sitio, 'textos.txt')
@@ -249,11 +275,13 @@ class VisorTurismoAR:
             if x > w_f * 0.7 and y > h_f * 0.75:
                 if self.paso < self.max_pasos:
                     self.paso += 1
+                    self.anim_frame = 0 # Reiniciar animación
                     self.reproducir_texto_paso()
                 else:
                     self.guia_activo = False # Salir si se presiona siguiente en el último paso
             elif x < w_f * 0.3 and y > h_f * 0.75:
                 self.paso = self.max_pasos # Llevar directamente al último paso
+                self.anim_frame = 0 # Reiniciar animación
                 self.reproducir_texto_paso()
 
     def run(self):
@@ -274,9 +302,81 @@ class VisorTurismoAR:
                         self.guia_activo, self.paso = True, 1
                         self.reproducir_texto_paso()
             else:
-                av = self.activos['avatars'].get(self.paso)
-                # Avatar a la izquierda (x_porcentaje = 0.40), proporcional (escala = 0.7)
-                if av: frame = render_alfa(frame, av.get_frame(), 0.40, 0.35, 0.7)
+                # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
+                if self.paso == 4 and self.activos.get('mapa_img') is not None:
+                    progreso = min(self.anim_frame / 50.0, 1.0) # Más rápida
+                    mapa = self.activos['mapa_img']
+                    h_m, w_m = mapa.shape[:2]
+                    
+                    # Escala y posición del mapa
+                    escala = 1.0 - (0.45 * progreso)
+                    w_target = w_f * escala
+                    h_target = h_m * (w_target / w_m)
+                    
+                    perspectiva = 0.75 * progreso # Caída extrema para verse en el suelo
+                    center_x = w_f / 2
+                    bottom_y = h_f - (h_f * 0.02 * progreso)
+                    top_y = bottom_y - h_target * (1 - 0.80 * progreso) # Aplastamiento grande
+                    
+                    pts1 = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
+                    pts2 = np.float32([
+                        [center_x - (w_target / 2) * (1 - perspectiva), top_y],
+                        [center_x + (w_target / 2) * (1 - perspectiva), top_y],
+                        [center_x - (w_target / 2), bottom_y],
+                        [center_x + (w_target / 2), bottom_y]
+                    ])
+                    
+                    matrix = cv2.getPerspectiveTransform(pts1, pts2)
+                    mapa_w = cv2.warpPerspective(mapa, matrix, (w_f, h_f), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+                    frame = render_alfa(frame, mapa_w, 0, 0, 1.0)
+                    
+                    # Pop up image sale de él
+                    if progreso > 0.5 and self.activos.get('pop_up_img') is not None:
+                        p_progreso = min((progreso - 0.5) / 0.5, 1.0)
+                        pop_esc = 0.05 + (0.35 * p_progreso)
+                        
+                        # Efecto de flotación continua
+                        flotacion = 0
+                        if p_progreso >= 1.0:
+                            flotacion = np.sin((self.anim_frame - 50) * 0.1) * 0.015
+                        
+                        pop_y = 0.70 - (0.35 * p_progreso) + flotacion
+                        
+                        # Cálculo para inicio central y término hacia la izquierda
+                        h_p, w_p = self.activos['pop_up_img'].shape[:2]
+                        w_scale = w_p * pop_esc
+                        
+                        inicio_x = 0.5 - (w_scale / (2.0 * w_f))  # Centro exacto
+                        fin_x = 0.25 - (w_scale / (2.0 * w_f))    # Más hacia la izquierda
+                        
+                        # Interpolación diagonal según el progreso
+                        x_porc = inicio_x + (fin_x - inicio_x) * p_progreso
+                        
+                        # Renderear
+                        frame = render_alfa(frame, self.activos['pop_up_img'], x_porc, pop_y, pop_esc)
+                        
+                    self.anim_frame += 1 # Incrementar infinito para la animación sinusoidal
+                # ------ FIN LÓGICA PASO 4 ------
+
+                # ------ RENDERIZADO DE AVATAR CON SOMBRA ------
+                av_handler = self.activos['avatars'].get(self.paso)
+                if av_handler:
+                    img_av = av_handler.get_frame()
+                    if img_av is not None:
+                        # Calculamos dimensiones del avatar escalado para la sombra
+                        h_orig, w_orig = img_av.shape[:2]
+                        esc = 0.7
+                        w_esc, h_esc = int(w_orig * esc), int(h_orig * esc)
+                        x_px, y_px = int(w_f * 0.40), int(h_f * 0.35)
+                        
+                        # Dibujar la sombra proyectada hacia atrás (como si el sol estuviera delante)
+                        # El radio vertical define cuánto se extiende hacia atrás
+                        ry_sombra = h_esc // 15
+                        self.dibujar_sombra(frame, x_px + w_esc // 2, y_px + h_esc - ry_sombra, w_esc // 2.5, ry_sombra)
+                        
+                        # Renderizar el avatar encima
+                        frame = render_alfa(frame, img_av, 0.40, 0.35, esc)
+
                 bu = self.activos['burbujas'].get(self.paso)
                 # Burbuja a la derecha del avatar (x_porcentaje = 0.60), proporcional (escala = 0.7)
                 if bu: frame = render_alfa(frame, bu.get_frame(), 0.60, 0.15, 0.7)
