@@ -397,4 +397,4 @@ class VisorTurismoAR:
 
 if __name__ == "__main__":
     app = VisorTurismoAR()
-    app.run()
+    app.run().
