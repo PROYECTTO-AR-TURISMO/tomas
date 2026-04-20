@@ -1,3 +1,4 @@
+from numpy.fft import fftfreq
 import cv2
 import numpy as np
 import os
