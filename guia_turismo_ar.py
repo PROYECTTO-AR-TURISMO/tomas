@@ -93,9 +93,10 @@ class GifHandler:
         if not self.frames: return None
         frame = self.frames[self.current_frame]
         
-        # En lugar de repetirse en bucle, se queda quieto en el último fotograma
-        if self.current_frame < len(self.frames) - 1:
-            self.current_frame += 1
+        # Avanzar el doble de rápido (2 frames por ciclo)
+        for _ in range(2):
+            if self.current_frame < len(self.frames) - 1:
+                self.current_frame += 1
             
         return frame
 
@@ -276,7 +277,7 @@ class VisorTurismoAR:
             return False
         
         self.sitio_actual_id = sitio_id
-        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}}
+        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'porton': None, 'suelo_textura': None}
         archivos = os.listdir(path_sitio)
         
         for i in range(1, self.max_pasos + 1):
@@ -296,6 +297,28 @@ class VisorTurismoAR:
         
         if 'historica.png' in [f.lower() for f in archivos]:
             self.activos['foto_h'] = cv2.imread(os.path.join(path_sitio, 'historica.png'), cv2.IMREAD_UNCHANGED)
+
+        # Cargar suelo específico si existe (suelo.png)
+        if 'suelo.png' in [f.lower() for f in archivos]:
+            img_s = cv2.imread(os.path.join(path_sitio, 'suelo.png'), cv2.IMREAD_UNCHANGED)
+            if img_s is not None:
+                if len(img_s.shape) == 3: img_s = cv2.cvtColor(img_s, cv2.COLOR_BGR2BGRA)
+                self.activos['suelo_textura'] = img_s
+
+        # Cargar y pre-procesar el portón para el paso 2
+        if 'porton.png' in [f.lower() for f in archivos]:
+            img_p = cv2.imread(os.path.join(path_sitio, 'porton.png'), cv2.IMREAD_UNCHANGED)
+            if img_p is not None:
+                if len(img_p.shape) == 3: img_p = cv2.cvtColor(img_p, cv2.COLOR_BGR2BGRA)
+
+                
+                # Aplicar inclinación de perspectiva para dar profundidad
+                h_p, w_p = img_p.shape[:2]
+                pts1 = np.float32([[0,0], [w_p,0], [0,h_p], [w_p,h_p]])
+                # Inclinamos el lado derecho para que parezca una puerta en ángulo
+                pts2 = np.float32([[w_p*0.1, h_p*0.1], [w_p*0.9, 0], [w_p*0.1, h_p*0.9], [w_p*0.9, h_p]])
+                matrix_p = cv2.getPerspectiveTransform(pts1, pts2)
+                self.activos['porton'] = cv2.warpPerspective(img_p, matrix_p, (w_p, h_p), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
 
         self.activos['mapa_img'] = None
         self.activos['pop_up_img'] = None
@@ -596,18 +619,49 @@ class VisorTurismoAR:
                     self.anim_frame += 1
                 # ------ FIN LÓGICA PASO 4 ------
 
+                # --- RENDERIZADO DEL SUELÓN (PASO 2) ---
+                if self.paso == 2 and self.activos.get('suelo_textura') is not None:
+                    tex_s = self.activos['suelo_textura']
+                    h_s, w_s = tex_s.shape[:2]
+                    # Puntos de la textura original
+                    pts_src = np.float32([[0,0], [w_s,0], [0,h_s], [w_s,h_s]])
+                    # Deformación para cubrir el suelo de la cámara (Horizonte a Base Ancha)
+                    pts_dst = np.float32([[w_f*0.2, h_f*0.75], [w_f*0.8, h_f*0.75], [-w_f*0.5, h_f], [w_f*1.5, h_f]])
+                    M_suelo = cv2.getPerspectiveTransform(pts_src, pts_dst)
+                    suelo_warped = cv2.warpPerspective(tex_s, M_suelo, (w_f, h_f), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+                    frame = render_alfa(frame, suelo_warped, 0, 0, 1.0)
+
+                # --- RENDERIZADO DEL PORTÓN (PASO 2) ---
+                if self.paso == 2 and self.activos.get('porton') is not None:
+                    # Portón más a la izquierda para asegurar visibilidad completa
+                    frame = render_alfa(frame, self.activos['porton'], 0.10, 0.02, 1.1)
+
                 # ------ RENDERIZADO DE AVATAR CON SOMBRA ------
                 av_handler = self.activos['avatars'].get(self.paso)
                 if av_handler:
-                    img_av = av_handler.get_frame()
+                    # En el paso 2, si el GIF llega al final, el avatar desaparece (efecto "entrar")
+                    if self.paso == 2 and av_handler.current_frame >= len(av_handler.frames) - 1:
+                        img_av = None
+                    else:
+                        img_av = av_handler.get_frame()
+
                     if img_av is not None:
+                        # Aplicar inclinación de perspectiva al avatar en el paso 2 para profundidad
+                        if self.paso == 2:
+                            h_a, w_a = img_av.shape[:2]
+                            pts1 = np.float32([[0,0], [w_a,0], [0,h_a], [w_a,h_a]])
+                            # Encogemos el lado derecho para simular que gira hacia el portón
+                            pts2 = np.float32([[0, 0], [w_a, h_a*0.12], [0, h_a], [w_a, h_a*0.88]])
+                            matrix_rot = cv2.getPerspectiveTransform(pts1, pts2)
+                            img_av = cv2.warpPerspective(img_av, matrix_rot, (w_a, h_a), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+
                         # Calculamos dimensiones del avatar escalado para la sombra
                         h_orig, w_orig = img_av.shape[:2]
                         esc = 0.7
                         w_esc, h_esc = int(w_orig * esc), int(h_orig * esc)
                         
-                        # Si es el paso 1, centrar horizontalmente. Si no, usar posición lateral (0.40)
-                        x_porc = (w_f - w_esc) / (2.0 * w_f) if self.paso == 1 else 0.40
+                        # Paso 1 centrado, Paso 2 a la izquierda (entrada al portón), otros a 0.40
+                        x_porc = (w_f - w_esc) / (2.0 * w_f) if self.paso == 1 else (0.20 if self.paso == 2 else 0.40)
                         y_porc = 0.35
                         x_px, y_px = int(w_f * x_porc), int(h_f * y_porc)
                         
@@ -621,7 +675,7 @@ class VisorTurismoAR:
                         
                         # Renderizar burbuja de texto encima del avatar
                         bu = self.activos['burbujas'].get(self.paso)
-                        if bu and self.paso != 5:
+                        if bu and self.paso != 5 and img_av is not None:
                             # Centramos la burbuja sobre el avatar y la subimos para que flote sobre él
                             frame = render_alfa(frame, bu.get_frame(), x_porc - 0.0, y_porc - 0.40, 0.9)
 
@@ -635,7 +689,7 @@ class VisorTurismoAR:
                         # Pregunta animada letra por letra saliendo de la zona de la cabeza
                         t1 = "PODRIAS RECORDARME EN QUE AÑO"
                         t2 = "SE TOMO LA FOTO PARA AVANZAR?"
-                        progreso = int(self.anim_frame * 0.7)
+                        progreso = int(self.anim_frame * 2.5)
                         
                         if progreso < len(t1):
                             frame = dibujar_texto_utf8(frame, t1[:progreso], (int(w_f*0.20), int(h_f*0.12)), 20, (0, 0, 0))
