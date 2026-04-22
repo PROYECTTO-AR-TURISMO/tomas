@@ -239,7 +239,7 @@ class VisorTurismoAR:
                     # Toma el primer archivo que encuentre
                     audio_path = os.path.join(ruta_audio, archivos[0])
                     pygame.mixer.music.load(audio_path)
-                    pygame.mixer.music.set_volume(0.2) # Volumen bajito para que no tape la voz principal
+                    pygame.mixer.music.set_volume(0.4) # Volumen un poco más alto
                     pygame.mixer.music.play(-1) # -1 significa reproducir en bucle (loop)
                     print(f"  [AUDIO] Música de fondo iniciada: {archivos[0]}")
                 else:
