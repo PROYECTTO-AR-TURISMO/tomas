@@ -724,8 +724,8 @@ class VisorTurismoAR:
                     frame = render_alfa(frame, self.btn_sig, 0.75, y_btn, esc_btn)
 
                 if self.btn_back is not None:
-                    y_btn = 0.82 - (0.03 * self.hover_back_anim) # Bajado ligeramente a 0.82
-                    esc_btn = 0.18 + (0.02 * self.hover_back_anim) # Restaurado al tamaño de los otros botones
+                    y_btn = 0.8 - (0.03 * self.hover_back_anim)
+                    esc_btn = 0.18 + (0.02 * self.hover_back_anim)
                     frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
 
                 if self.btn_salt is not None and self.paso != 5:
