@@ -166,6 +166,8 @@ class VisorTurismoAR:
         self.trivia_acierto = None # Para marcar la respuesta correcta elegida
         self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0] # Animación para cada opción de la trivia
         self.hover_popup_anim = 0.0 # Animación para el efecto de onda del pop-up
+        self.hover_trivia_anims_2 = [0.0, 0.0, 0.0, 0.0] # Animación para la segunda trivia
+        self.hover_mapa_anim = 0.0 # Efecto de fluido/hundimiento para el mapa
         
         # Cargar botones de interfaz
         self.btn_sig = self._buscar_archivo_ui('next.png')
@@ -174,6 +176,7 @@ class VisorTurismoAR:
         self.btn_input = self._buscar_archivo_ui('input_box.png')
         self.img_pregunta = self._buscar_archivo_ui('pregunta.png')
         self.avatar_5 = self._buscar_archivo_ui('avatar_5.png')
+        self.img_escaner = self._buscar_archivo_ui('fondo_escaner.png')
         
         # Igualar el tamaño del botón 'saltar' y 'atrás' al botón 'siguiente' para mantener consistencia
         if self.btn_sig is not None:
@@ -221,6 +224,8 @@ class VisorTurismoAR:
             if anio not in self.trivia_opciones:
                 self.trivia_opciones.append(anio)
         random.shuffle(self.trivia_opciones)
+
+        self.trivia_opciones_fase2 = ["Francisco de Miranda", "Gabriel García Márquez", "Policarpa Salavarrieta", "Justo Manuel Triviña"]
 
         self.trivia_fase = 1 # 1: Año, 2: Autor
         self.input_texto = "" # Para almacenar lo que el usuario escribe
@@ -382,6 +387,8 @@ class VisorTurismoAR:
         self.trivia_errores = [] # Limpiar errores al cambiar de fase o paso
         self.trivia_acierto = None
         self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0]
+        self.hover_trivia_anims_2 = [0.0, 0.0, 0.0, 0.0]
+        self.hover_mapa_anim = 0.0
         # Reiniciar frames de los GIFs activos para que empiecen de cero
         for handler in list(self.activos['avatars'].values()) + list(self.activos['burbujas'].values()):
             handler.current_frame = 0
@@ -433,6 +440,21 @@ class VisorTurismoAR:
                             self.tts.decir("Ese no es el año correcto. ¡Sigue intentando!")
                         return
 
+            elif self.paso == 5 and self.trivia_fase == 2:
+                for i, nombre in enumerate(self.trivia_opciones_fase2):
+                    x1, y1_base = int(w_f * 0.25), int(h_f * (0.55 + i * 0.08))
+                    x2, y2_base = x1 + 320, y1_base + 40
+                    if x1 < x < x2 and y1_base < y < y2_base:
+                        if nombre == "Justo Manuel Triviña":
+                            self.trivia_acierto = nombre
+                            self.monedas += 100
+                            self._cambiar_paso(self.paso + 1, "excelente ya podemos avanzar por la historia de monteria. ")
+                        else:
+                            if nombre not in self.trivia_errores:
+                                self.trivia_errores.append(nombre)
+                            self.tts.decir("Ese no es el nombre correcto. Intenta de nuevo.")
+                        return
+
             # Lógica de botones de navegación inferior
             if y > h_f * 0.75:
                 # Botón Atrás (Izquierda) - Ahora disponible durante las trivias
@@ -468,8 +490,13 @@ class VisorTurismoAR:
             cv2.setMouseCallback("VISOR_TURISMO_AR", self.mouse_callback, param=(h_f, w_f))
 
             if not self.guia_activo:
-                cv2.rectangle(frame, (int(w_f*0.25), int(h_f*0.25)), (int(w_f*0.75), int(h_f*0.75)), (0, 255, 0), 2)
-                cv2.putText(frame, "ESCANEE QR", (int(w_f*0.4), int(h_f*0.2)), 0, 0.7, (0, 255, 0), 2)
+                # Renderizar la imagen decorativa detrás del visor del escáner
+                if self.img_escaner is not None:
+                    # Forzamos que la imagen ocupe exactamente el tamaño de la pantalla
+                    img_full = cv2.resize(self.img_escaner, (w_f, h_f), interpolation=cv2.INTER_AREA)
+                    frame = render_alfa(frame, img_full, 0.0, -0.05, 1.0)
+                
+                cv2.putText(frame, "ESCANEE QR", (int(w_f * 0.38), int(h_f * 0.98)), 0, 0.7, (0, 255, 0), 2)
                 # Resetear trivia y tienda al volver a escanear
                 self.trivia_fase = 1
                 self.input_texto = ""
@@ -525,6 +552,26 @@ class VisorTurismoAR:
                     
                     # Interpolación de los puntos de destino y transformación
                     pts_dst = pts_inicio + (pts_fin - pts_inicio) * fall_prog
+                    
+                    # --- EFECTO DE FLUIDO / HUNDIMIENTO CUANDO FLOTA ---
+                    if fall_prog >= 1.0:
+                        # Detectar si el mouse está sobre el área del mapa (perspectiva)
+                        cnt_mapa = pts_dst.reshape((-1, 1, 2)).astype(np.int32)
+                        is_over_map = cv2.pointPolygonTest(cnt_mapa, (self.mouse_x, self.mouse_y), False) >= 0
+                        
+                        # Suavizado de la animación de interacción
+                        self.hover_mapa_anim = min(1.0, self.hover_mapa_anim + 0.1) if is_over_map else max(0.0, self.hover_mapa_anim - 0.1)
+                        
+                        if self.hover_mapa_anim > 0:
+                            for i in range(4):
+                                px, py = pts_dst[i]
+                                dist = np.sqrt((px - self.mouse_x)**2 + (py - self.mouse_y)**2)
+                                # Influencia: 1.0 en el cursor, 0.0 a 350px de distancia
+                                influencia = max(0, 1.0 - dist / 350.0)
+                                # Hundimiento con un pequeño rebote (seno) para simular fluido
+                                hundimiento = (influencia * 35 + np.sin(self.anim_frame * 0.2) * 4 * influencia) * self.hover_mapa_anim
+                                pts_dst[i][1] += hundimiento # Aumentar Y es "hundir"
+
                     pts_src = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
                     
                     try:
@@ -541,7 +588,8 @@ class VisorTurismoAR:
                         flotacion = np.sin(self.anim_frame * 0.1) * 0.02
                         # Emerge escalando y subiendo desde el centro del mapa con diagonal hacia la izquierda
                         esc_pop = 0.4 * pop_prog
-                        y_pop = 0.6 - (0.3 * pop_prog) + flotacion
+                        # El pop-up también se hunde un poco si el mapa lo hace
+                        y_pop = 0.6 - (0.3 * pop_prog) + flotacion + (0.05 * self.hover_mapa_anim)
                         x_pop = 0.45 - (0.35 * pop_prog) # Empieza cerca del centro y se desplaza a la izquierda
                         frame = render_alfa(frame, self.activos['pop_up_img'], x_pop, y_pop, esc_pop)
                     
@@ -557,7 +605,11 @@ class VisorTurismoAR:
                         h_orig, w_orig = img_av.shape[:2]
                         esc = 0.7
                         w_esc, h_esc = int(w_orig * esc), int(h_orig * esc)
-                        x_px, y_px = int(w_f * 0.40), int(h_f * 0.35)
+                        
+                        # Si es el paso 1, centrar horizontalmente. Si no, usar posición lateral (0.40)
+                        x_porc = (w_f - w_esc) / (2.0 * w_f) if self.paso == 1 else 0.40
+                        y_porc = 0.35
+                        x_px, y_px = int(w_f * x_porc), int(h_f * y_porc)
                         
                         # Dibujar la sombra proyectada hacia atrás (como si el sol estuviera delante)
                         # El radio vertical define cuánto se extiende hacia atrás
@@ -565,11 +617,13 @@ class VisorTurismoAR:
                         self.dibujar_sombra(frame, x_px + w_esc // 2, y_px + h_esc - ry_sombra, w_esc // 2.5, ry_sombra)
                         
                         # Renderizar el avatar encima
-                        frame = render_alfa(frame, img_av, 0.40, 0.35, esc)
-
-                bu = self.activos['burbujas'].get(self.paso)
-                # Burbuja a la derecha del avatar (x_porcentaje = 0.60), proporcional (escala = 0.7)
-                if bu and self.paso != 5: frame = render_alfa(frame, bu.get_frame(), 0.60, 0.15, 0.7)
+                        frame = render_alfa(frame, img_av, x_porc, y_porc, esc)
+                        
+                        # Renderizar burbuja de texto encima del avatar
+                        bu = self.activos['burbujas'].get(self.paso)
+                        if bu and self.paso != 5:
+                            # Centramos la burbuja sobre el avatar y la subimos para que flote sobre él
+                            frame = render_alfa(frame, bu.get_frame(), x_porc - 0.0, y_porc - 0.40, 0.9)
 
                 # --- RENDERIZADO DE INTERFAZ DE TRIVIA (PASO 5) ---
                 if self.paso == 5:
@@ -622,14 +676,31 @@ class VisorTurismoAR:
                         
                         frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.28), int(h_f*0.38)), 26, (0, 0, 0))
                         
-                        if self.btn_input is not None:
-                            # Renderizar la imagen de la caja de respuesta
-                            frame = render_alfa(frame, self.btn_input, 0.20, 0.50, 0.6)
-                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.28), int(h_f*0.77)), 22, (0, 0, 0))
-                        else:
-                            # Fallback si no se encuentra 'input_box.png'
-                            cv2.rectangle(frame, (int(w_f*0.25), int(h_f*0.50)), (int(w_f*0.75), int(h_f*0.60)), (255, 255, 255), 1)
-                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.28), int(h_f*0.77)), 22, (0, 255, 0))
+                        # Renderizado de opciones múltiples para la Fase 2
+                        for i, nombre in enumerate(self.trivia_opciones_fase2):
+                            x1, y1_base = int(w_f * 0.25), int(h_f * (0.55 + i * 0.08))
+                            x2, y2_base = x1 + 320, y1_base + 40
+                            
+                            hover_op = x1 < self.mouse_x < x2 and y1_base < self.mouse_y < y2_base
+                            # Suavizado de la animación
+                            self.hover_trivia_anims_2[i] = min(1.0, self.hover_trivia_anims_2[i] + 0.3) if hover_op else max(0.0, self.hover_trivia_anims_2[i] - 0.3)
+                            
+                            y_offset = int(h_f * 0.01 * self.hover_trivia_anims_2[i])
+                            y1, y2 = y1_base - y_offset, y2_base - y_offset
+                            
+                            # Lógica de colores
+                            if nombre in self.trivia_errores:
+                                color_op = (0, 0, 255) # Rojo
+                            elif nombre == self.trivia_acierto:
+                                color_op = (0, 255, 0) # Verde
+                            elif hover_op:
+                                color_op = (180, 180, 180) # Hover
+                            else:
+                                color_op = (220, 220, 220) # Gris
+                                
+                            cv2.rectangle(frame, (x1, y1), (x2, y2), color_op, -1)
+                            # Usamos dibujar_texto_utf8 para los nombres por caracteres especiales
+                            frame = dibujar_texto_utf8(frame, nombre, (x1 + 10, y1 + 5), 18, (0, 0, 0))
 
                 if self.paso == self.max_pasos and self.activos['foto_h'] is not None:
                     # Mover la foto histórica para no tapar el avatar
@@ -710,23 +781,6 @@ class VisorTurismoAR:
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'): break
             
-            # Lógica para capturar texto cuando estamos en la pregunta abierta del paso 5
-            if self.guia_activo and self.paso == 5 and self.trivia_fase == 2:
-                if key == 13: # Tecla ENTER
-                    respuesta = self.input_texto.lower().strip()
-                    if respuesta == "justo manuel tribiño" or respuesta == "justo manuel tribino":
-                        self.monedas += 100
-                        self._cambiar_paso(self.paso + 1, "excelente ya podemos avanzar por la historia de monteria. ")
-                    else:
-                        self.tts.decir("Ese no es el nombre correcto. Intenta de nuevo.")
-                        self.input_texto = "" # Limpiar para reintentar
-                elif key == 8: # Tecla Retroceso (Backspace)
-                    self.input_texto = self.input_texto[:-1]
-                elif key != 255 and key != ord('q'): # Si se presiona cualquier otra tecla
-                    try:
-                        char = chr(key)
-                        if char.isprintable(): self.input_texto += char
-                    except: pass
 
         self.cap.release()
         cv2.destroyAllWindows()
