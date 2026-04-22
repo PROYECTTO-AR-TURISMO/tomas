@@ -161,6 +161,11 @@ class VisorTurismoAR:
         self.paso = 1
         self.max_pasos = 6
         self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None}
+        self.mapa_noise_mask = None # Inicialización de seguridad para evitar cierres
+        self.trivia_errores = [] # Para rastrear clics incorrectos en la trivia
+        self.trivia_acierto = None # Para marcar la respuesta correcta elegida
+        self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0] # Animación para cada opción de la trivia
+        self.hover_popup_anim = 0.0 # Animación para el efecto de onda del pop-up
         
         # Cargar botones de interfaz
         self.btn_sig = self._buscar_archivo_ui('next.png')
@@ -168,6 +173,7 @@ class VisorTurismoAR:
         self.btn_back = self._buscar_archivo_ui('back.png')
         self.btn_input = self._buscar_archivo_ui('input_box.png')
         self.img_pregunta = self._buscar_archivo_ui('pregunta.png')
+        self.avatar_5 = self._buscar_archivo_ui('avatar_5.png')
         
         # Igualar el tamaño del botón 'saltar' y 'atrás' al botón 'siguiente' para mantener consistencia
         if self.btn_sig is not None:
@@ -288,6 +294,7 @@ class VisorTurismoAR:
 
         self.activos['mapa_img'] = None
         self.activos['pop_up_img'] = None
+        self.mapa_noise_mask = None # Resetear máscara al cargar nuevo sitio
         
         mapa_file = next((f for f in archivos if f.lower().startswith('mapa.') and f.lower().endswith(('.png', '.jpg', '.jpeg'))), None)
         pop_up_file = next((f for f in archivos if f.lower().startswith('pop_up.') and f.lower().endswith(('.png', '.jpg', '.jpeg'))), None)
@@ -296,6 +303,24 @@ class VisorTurismoAR:
             img = cv2.imread(os.path.join(path_sitio, mapa_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             self.activos['mapa_img'] = img
+            
+            # Generar máscara compleja de materialización (H, V, Diag, Ruido) aquí, si el mapa se cargó
+            if self.activos['mapa_img'] is not None:
+                h, w = self.activos['mapa_img'].shape[:2]
+                noise = np.random.rand(h, w).astype(np.float32)
+                h_mask = np.repeat(np.random.rand(h // 6 + 1), 6)[:h, np.newaxis]
+                v_mask = np.repeat(np.random.rand(w // 6 + 1), 6)[np.newaxis, :w]
+                yy, xx = np.indices((h, w))
+                diag = (xx + yy) / (w + h)
+                combined = (noise * 0.4 + h_mask * 0.2 + v_mask * 0.2 + diag * 0.2)
+                
+                diff = combined.max() - combined.min()
+                if diff > 0:
+                    self.mapa_noise_mask = (combined - combined.min()) / diff
+                else:
+                    self.mapa_noise_mask = combined
+            else:
+                self.mapa_noise_mask = None # Asegurarse de que sea None si el mapa no se cargó
         if pop_up_file:
             img = cv2.imread(os.path.join(path_sitio, pop_up_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
@@ -354,21 +379,12 @@ class VisorTurismoAR:
         """Cambia el paso y reinicia animaciones y voz."""
         self.paso = nuevo_paso
         self.anim_frame = 0
+        self.trivia_errores = [] # Limpiar errores al cambiar de fase o paso
+        self.trivia_acierto = None
+        self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0]
         # Reiniciar frames de los GIFs activos para que empiecen de cero
         for handler in list(self.activos['avatars'].values()) + list(self.activos['burbujas'].values()):
             handler.current_frame = 0
-            
-        # Generar máscara compleja de materialización (H, V, Diag, Ruido) para el paso 4
-        if nuevo_paso == 4 and self.activos.get('mapa_img') is not None:
-            h, w = self.activos['mapa_img'].shape[:2]
-            noise = np.random.rand(h, w).astype(np.float32)
-            h_mask = np.repeat(np.random.rand(h // 6 + 1), 6)[:h, np.newaxis]
-            v_mask = np.repeat(np.random.rand(w // 6 + 1), 6)[np.newaxis, :w]
-            yy, xx = np.indices((h, w))
-            diag = (xx + yy) / (w + h)
-            combined = (noise * 0.4 + h_mask * 0.2 + v_mask * 0.2 + diag * 0.2)
-            self.mapa_noise_mask = (combined - combined.min()) / (combined.max() - combined.min())
-
         self.reproducir_texto_paso(mensaje_extra)
 
     def mouse_callback(self, event, x, y, flags, param):
@@ -403,32 +419,44 @@ class VisorTurismoAR:
             # --- Lógica de Juego (Paso 5) ---
             if self.paso == 5 and self.trivia_fase == 1:
                 for i, anio in enumerate(self.trivia_opciones):
-                    x1, y1 = int(w_f * 0.05), int(h_f * (0.35 + i * 0.12))
+                    x1, y1 = int(w_f * 0.72), int(h_f * (0.35 + i * 0.12))
                     x2, y2 = x1 + 140, y1 + 50
                     if x1 < x < x2 and y1 < y < y2:
                         if anio == 1938:
+                            self.trivia_acierto = anio
                             self.trivia_fase = 2 # Pasar a la siguiente pregunta del autor
                             self._cambiar_paso(self.paso, "¡Correcto! ")
                             self.monedas += 50
                         else:
+                            if anio not in self.trivia_errores:
+                                self.trivia_errores.append(anio)
                             self.tts.decir("Ese no es el año correcto. ¡Sigue intentando!")
                         return
 
             # Lógica de botones de navegación inferior
-            if y > h_f * 0.75 and self.paso != 5:
-                # Botón Siguiente (Derecha)
-                if x > w_f * 0.7:
-                    if self.paso < self.max_pasos:
-                        self._cambiar_paso(self.paso + 1)
-                    else:
-                        self.guia_activo = False # Salir si se presiona siguiente en el último paso
-                # Botón Atrás (Izquierda - Posición original de Saltar)
-                elif x < w_f * 0.18:
+            if y > h_f * 0.75:
+                # Botón Atrás (Izquierda) - Ahora disponible durante las trivias
+                if x < w_f * 0.18:
                     if self.paso > 1:
-                        self._cambiar_paso(self.paso - 1)
-                # Botón Saltar (Al lado de Atrás)
-                elif 0.18 * w_f <= x < 0.38 * w_f:
-                    self._cambiar_paso(self.max_pasos)
+                        # Si estamos en la fase 2 de la trivia, regresar a la fase 1
+                        if self.paso == 5 and self.trivia_fase == 2:
+                            self.trivia_fase = 1
+                            self.input_texto = ""
+                            self._cambiar_paso(5)
+                        else:
+                            self._cambiar_paso(self.paso - 1)
+                
+                # Los botones Siguiente y Saltar siguen bloqueados hasta completar la trivia
+                elif self.paso != 5:
+                    # Botón Siguiente (Derecha)
+                    if x > w_f * 0.7:
+                        if self.paso < self.max_pasos:
+                            self._cambiar_paso(self.paso + 1)
+                        else:
+                            self.guia_activo = False # Salir si se presiona siguiente en el último paso
+                    # Botón Saltar (Al lado de Atrás)
+                    elif 0.18 * w_f <= x < 0.38 * w_f:
+                        self._cambiar_paso(self.max_pasos)
 
     def run(self):
         cv2.namedWindow("VISOR_TURISMO_AR")
@@ -445,6 +473,9 @@ class VisorTurismoAR:
                 # Resetear trivia y tienda al volver a escanear
                 self.trivia_fase = 1
                 self.input_texto = ""
+                self.trivia_errores = []
+                self.trivia_acierto = None
+                self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0]
                 self.tienda_abierta = False
                 data, _, _ = self.detector.detectAndDecode(frame)
                 if data:
@@ -454,66 +485,67 @@ class VisorTurismoAR:
             else:
                 # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
                 if self.paso == 4 and self.activos.get('mapa_img') is not None:
-                    # Aceleramos la animación a 30 frames
-                    progreso = min(self.anim_frame / 30.0, 1.0) 
+                    # Configuración de tiempos
+                    duracion_caida = 40
+                    duracion_materializacion = 30 # Materialización más rápida
+                    
+                    # Progresos de animación (0.0 a 1.0)
+                    fall_prog = min(self.anim_frame / duracion_caida, 1.0)
+                    mat_prog = min(self.anim_frame / duracion_materializacion, 1.0)
+                    
                     mapa_original = self.activos['mapa_img']
                     h_m, w_m = mapa_original.shape[:2]
                     
-                    # --- EFECTO DE MATERIALIZACIÓN COMPLEJA ---
-                    mapa = mapa_original.copy()
-                    if hasattr(self, 'mapa_noise_mask'):
-                        mask = (self.mapa_noise_mask < progreso).astype(np.uint8) * 255
-                        mapa[:, :, 3] = cv2.bitwise_and(mapa[:, :, 3], mask)
+                    # 1. Aplicar máscara de materialización (Líneas y ruido aleatorio)
+                    mapa_animado = mapa_original.copy()
+                    if self.mapa_noise_mask is not None and mapa_animado.shape[2] == 4:
+                        mask = (self.mapa_noise_mask < mat_prog).astype(np.uint8) * 255
+                        mapa_animado[:, :, 3] = cv2.bitwise_and(mapa_animado[:, :, 3], mask)
                     
-                    # --- POSICIÓN FIJA EN EL SUELO (MÁS GRANDE) ---
-                    escala = 0.85 
-                    w_target = w_f * escala
+                    # 2. Lógica de caída con Perspectiva
+                    escala_base = 0.8
+                    w_target = w_f * escala_base
                     h_target = h_m * (w_target / w_m)
                     
-                    # Perspectiva de suelo fija
-                    perspectiva = 0.75 
                     center_x = w_f / 2
-                    bottom_y = h_f - (h_f * 0.05)
-                    top_y = bottom_y - (h_target * 0.25) # Efecto de profundidad
+                    bottom_y = h_f * 0.9 # El mapa pivota sobre la base del suelo
                     
-                    pts1 = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
-                    pts2 = np.float32([
-                        [center_x - (w_target / 2) * (1 - perspectiva), top_y],
-                        [center_x + (w_target / 2) * (1 - perspectiva), top_y],
-                        [center_x - (w_target / 2), bottom_y],
-                        [center_x + (w_target / 2), bottom_y]
+                    # Coordenadas Destino: De Vertical (Inicio) a Suelo (Fin)
+                    pts_inicio = np.float32([ # El mapa empieza vertical
+                        [center_x - w_target/2, bottom_y - h_target], [center_x + w_target/2, bottom_y - h_target],
+                        [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]
                     ])
                     
-                    matrix = cv2.getPerspectiveTransform(pts1, pts2)
-                    mapa_w = cv2.warpPerspective(mapa, matrix, (w_f, h_f), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
-                    frame = render_alfa(frame, mapa_w, 0, 0, 1.0)
+                    persp_suelo = 0.85 # Efecto de profundidad (más acostado)
+                    pts_fin = np.float32([
+                        [center_x - (w_target/2) * persp_suelo, bottom_y - (h_target * 0.3)],
+                        [center_x + (w_target/2) * persp_suelo, bottom_y - (h_target * 0.3)],
+                        [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]
+                    ])
                     
-                    # El Pop-up sale después de que el mapa está casi dibujado (60%)
-                    if progreso > 0.6 and self.activos.get('pop_up_img') is not None:
-                        p_progreso = min((progreso - 0.6) / 0.4, 1.0)
-                        pop_esc = 0.05 + (0.35 * p_progreso)
-                        
-                        # Efecto de flotación continua
-                        flotacion = 0
-                        if p_progreso >= 1.0:
-                            flotacion = np.sin((self.anim_frame - 50) * 0.1) * 0.015
-                        
-                        pop_y = 0.70 - (0.35 * p_progreso) + flotacion
-                        
-                        # Cálculo para inicio central y término hacia la izquierda
-                        h_p, w_p = self.activos['pop_up_img'].shape[:2]
-                        w_scale = w_p * pop_esc
-                        
-                        inicio_x = 0.5 - (w_scale / (2.0 * w_f))  # Centro exacto
-                        fin_x = 0.25 - (w_scale / (2.0 * w_f))    # Más hacia la izquierda
-                        
-                        # Interpolación diagonal según el progreso
-                        x_porc = inicio_x + (fin_x - inicio_x) * p_progreso
-                        
-                        # Renderear
-                        frame = render_alfa(frame, self.activos['pop_up_img'], x_porc, pop_y, pop_esc)
-                        
-                    self.anim_frame += 1 # Incrementar infinito para la animación sinusoidal
+                    # Interpolación de los puntos de destino y transformación
+                    pts_dst = pts_inicio + (pts_fin - pts_inicio) * fall_prog
+                    pts_src = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
+                    
+                    try:
+                        matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
+                        mapa_warped = cv2.warpPerspective(mapa_animado, matrix, (w_f, h_f), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+                        frame = render_alfa(frame, mapa_warped, 0, 0, 1.0)
+                    except:
+                        # Fallback de seguridad si la matriz es inválida
+                        frame = render_alfa(frame, mapa_animado, 0.1, 0.6, 0.8)
+
+                    # 3. Aparición del Pop-up (sale del mapa después de que este caiga)
+                    if fall_prog >= 1.0 and self.activos.get('pop_up_img') is not None:
+                        pop_prog = min((self.anim_frame - duracion_caida) / 30.0, 1.0)
+                        flotacion = np.sin(self.anim_frame * 0.1) * 0.02
+                        # Emerge escalando y subiendo desde el centro del mapa con diagonal hacia la izquierda
+                        esc_pop = 0.4 * pop_prog
+                        y_pop = 0.6 - (0.3 * pop_prog) + flotacion
+                        x_pop = 0.45 - (0.35 * pop_prog) # Empieza cerca del centro y se desplaza a la izquierda
+                        frame = render_alfa(frame, self.activos['pop_up_img'], x_pop, y_pop, esc_pop)
+                    
+                    self.anim_frame += 1
                 # ------ FIN LÓGICA PASO 4 ------
 
                 # ------ RENDERIZADO DE AVATAR CON SOMBRA ------
@@ -542,37 +574,62 @@ class VisorTurismoAR:
                 # --- RENDERIZADO DE INTERFAZ DE TRIVIA (PASO 5) ---
                 if self.paso == 5:
                     if self.trivia_fase == 1:
-                        # Pregunta 1: El año (Usamos soporte UTF8 para la 'ñ' de AÑO)
-                        frame = dibujar_texto_utf8(frame, "PODRIAS RECORDARME EN QUE AÑO", (int(w_f*0.05), int(h_f*0.25)), 20, (0, 0, 0))
-                        frame = dibujar_texto_utf8(frame, "SE TOMO LA FOTO PARA AVANZAR?", (int(w_f*0.05), int(h_f*0.30)), 20, (0, 0, 0))
+                        # Imagen para la primera trivia (Fase 1: Años)
+                        if self.avatar_5 is not None:
+                            frame = render_alfa(frame, self.avatar_5, 0.02, 0.20, 0.6)
+
+                        # Pregunta animada letra por letra saliendo de la zona de la cabeza
+                        t1 = "PODRIAS RECORDARME EN QUE AÑO"
+                        t2 = "SE TOMO LA FOTO PARA AVANZAR?"
+                        progreso = int(self.anim_frame * 0.7)
+                        
+                        if progreso < len(t1):
+                            frame = dibujar_texto_utf8(frame, t1[:progreso], (int(w_f*0.20), int(h_f*0.12)), 20, (0, 0, 0))
+                        else:
+                            frame = dibujar_texto_utf8(frame, t1, (int(w_f*0.20), int(h_f*0.12)), 20, (0, 0, 0))
+                            frame = dibujar_texto_utf8(frame, t2[:max(0, progreso - len(t1))], (int(w_f*0.20), int(h_f*0.17)), 20, (0, 0, 0))
+                        
+                        self.anim_frame += 1 # Incrementar para manejar la animación del texto
                         
                         for i, anio in enumerate(self.trivia_opciones):
-                            x1, y1 = int(w_f * 0.05), int(h_f * (0.35 + i * 0.12))
-                            x2, y2 = x1 + 140, y1 + 50
+                            x1, y1_base = int(w_f * 0.72), int(h_f * (0.35 + i * 0.12))
+                            x2, y2_base = x1 + 140, y1_base + 50
                             
-                            hover_op = x1 < self.mouse_x < x2 and y1 < self.mouse_y < y2
-                            color_op = (0, 255, 0) if hover_op else (220, 220, 220)
+                            hover_op = x1 < self.mouse_x < x2 and y1_base < self.mouse_y < y2_base
+                            # Suavizado de la animación de levante (subida)
+                            self.hover_trivia_anims[i] = min(1.0, self.hover_trivia_anims[i] + 0.3) if hover_op else max(0.0, self.hover_trivia_anims[i] - 0.3)
+                            
+                            # Aplicar efecto de levante a las coordenadas de dibujo
+                            y_offset = int(h_f * 0.02 * self.hover_trivia_anims[i])
+                            y1, y2 = y1_base - y_offset, y2_base - y_offset
+                            
+                            # Lógica de colores: Rojo si falló, Verde si acertó, Gris si hover
+                            if anio in self.trivia_errores:
+                                color_op = (0, 0, 255) # Rojo
+                            elif anio == self.trivia_acierto:
+                                color_op = (0, 255, 0) # Verde (solo el correcto)
+                            elif hover_op:
+                                color_op = (180, 180, 180) # Hover neutro para los demás
+                            else:
+                                color_op = (220, 220, 220) # Gris normal
+                                
                             cv2.rectangle(frame, (x1, y1), (x2, y2), color_op, -1)
                             cv2.putText(frame, str(anio), (x1+35, y1+35), 0, 0.7, (0, 0, 0), 2)
                     else:
-                        # Pregunta 2: El autor (Imagen de fondo para la pregunta + Texto)
+                        # Pregunta 2: El autor (Imagen de fondo + Texto encima)
                         if self.img_pregunta is not None:
-                            # Posicionamos la imagen de la pregunta un poco más arriba (y=0.10)
                             frame = render_alfa(frame, self.img_pregunta, 0.20, 0.10, 0.6)
                         
-                        # El texto de la pregunta se muestra encima de la imagen pregunta
-                        frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.28), int(h_f*0.34)), 26, (0, 0, 0))
+                        frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.28), int(h_f*0.38)), 26, (0, 0, 0))
                         
                         if self.btn_input is not None:
-                            # Renderizar la imagen de la caja de respuesta subida (y=0.50)
+                            # Renderizar la imagen de la caja de respuesta
                             frame = render_alfa(frame, self.btn_input, 0.20, 0.50, 0.6)
-                            
-                            # Texto del usuario subido para que entre en la nueva posición de la caja
-                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.28), int(h_f*0.76)), 22, (0, 0, 0))
+                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.28), int(h_f*0.77)), 22, (0, 0, 0))
                         else:
                             # Fallback si no se encuentra 'input_box.png'
                             cv2.rectangle(frame, (int(w_f*0.25), int(h_f*0.50)), (int(w_f*0.75), int(h_f*0.60)), (255, 255, 255), 1)
-                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.27), int(h_f*0.53)), 22, (0, 255, 0))
+                            frame = dibujar_texto_utf8(frame, self.input_texto + "|", (int(w_f*0.28), int(h_f*0.77)), 22, (0, 255, 0))
 
                 if self.paso == self.max_pasos and self.activos['foto_h'] is not None:
                     # Mover la foto histórica para no tapar el avatar
@@ -595,7 +652,7 @@ class VisorTurismoAR:
                     esc_btn = 0.18 + (0.02 * self.hover_sig_anim) # Crece un poco
                     frame = render_alfa(frame, self.btn_sig, 0.75, y_btn, esc_btn)
 
-                if self.btn_back is not None and self.paso != 5:
+                if self.btn_back is not None:
                     y_btn = 0.82 - (0.03 * self.hover_back_anim) # Bajado ligeramente a 0.82
                     esc_btn = 0.18 + (0.02 * self.hover_back_anim) # Restaurado al tamaño de los otros botones
                     frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
