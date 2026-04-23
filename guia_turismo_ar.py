@@ -177,6 +177,8 @@ class VisorTurismoAR:
         self.btn_input = self._buscar_archivo_ui('input_box.png')
         self.img_pregunta = self._buscar_archivo_ui('pregunta.png')
         self.avatar_5 = self._buscar_archivo_ui('avatar_5.png')
+        self.bg_opciones_1 = self._buscar_archivo_ui('fondo_opciones.png')
+        self.bg_opciones_2 = self._buscar_archivo_ui('fondo_opciones_2.png')
         self.img_escaner = self._buscar_archivo_ui('fondo_escaner.png')
         
         # Igualar el tamaño del botón 'saltar' y 'atrás' al botón 'siguiente' para mantener consistencia
@@ -218,13 +220,8 @@ class VisorTurismoAR:
         self.btn_tienda = self._buscar_archivo_ui('shop.png')
         self.btn_moneda = self._buscar_archivo_ui('coin.png')
 
-        # Configuración de Trivia para el Paso 5
-        self.trivia_opciones = [1938]
-        while len(self.trivia_opciones) < 4:
-            anio = random.randint(1900, 1999)
-            if anio not in self.trivia_opciones:
-                self.trivia_opciones.append(anio)
-        random.shuffle(self.trivia_opciones)
+        # Configuración de Trivia para el Paso 5 (Alineada con la imagen de fondo proporcionada)
+        self.trivia_opciones = [1976, 1986, 1938, 1900]
 
         self.trivia_opciones_fase2 = ["Francisco de Miranda", "Gabriel García Márquez", "Policarpa Salavarrieta", "Justo Manuel Triviña"]
 
@@ -423,8 +420,8 @@ class VisorTurismoAR:
         self.mouse_x, self.mouse_y = x, y
         
         if event == cv2.EVENT_LBUTTONDOWN and self.guia_activo:
-            # Botón Tienda (Arriba a la derecha)
-            if w_f * 0.86 < x < w_f * 0.94 and h_f * 0.01 < y < h_f * 0.08:
+            # Botón Tienda (Arriba a la derecha, ajustado para el nuevo tamaño)
+            if w_f * 0.85 < x < w_f * 0.98 and h_f * 0.01 < y < h_f * 0.15:
                 self.tienda_abierta = not self.tienda_abierta
                 return
 
@@ -448,9 +445,25 @@ class VisorTurismoAR:
 
             # --- Lógica de Juego (Paso 5) ---
             if self.paso == 5 and self.trivia_fase == 1:
+                # Calcular dinámicamente las dimensiones de la imagen de fondo para alinear los clics
+                if self.bg_opciones_1 is not None:
+                    target_h_bg = h_f * 0.65 # Más pequeño para que la cámara sea el fondo real
+                    base_scale_bg = target_h_bg / self.bg_opciones_1.shape[0]
+                    w_bg_px = self.bg_opciones_1.shape[1] * base_scale_bg
+                    # Alinear a la derecha con 2% de margen
+                    x_porc_bg = (w_f - w_bg_px - (w_f * 0.02)) / w_f
+                    x_img, y_img = w_f * x_porc_bg, h_f * 0.15 # Un poco más centrado verticalmente
+                    w_img, h_img = w_bg_px, target_h_bg
+                else:
+                    x_img, y_img, w_img, h_img = w_f * 0.35, h_f * 0.10, w_f * 0.60, h_f * 0.80
+
                 for i, anio in enumerate(self.trivia_opciones):
-                    x1, y1 = int(w_f * 0.72), int(h_f * (0.35 + i * 0.12))
-                    x2, y2 = x1 + 140, y1 + 50
+                    # Coordenadas ajustadas para representar el ancho visual real de la caja
+                    x1 = int(x_img + w_img * 0.69)
+                    x2 = int(x_img + w_img * 0.92)
+                    y1 = int(y_img + h_img * (0.31 + i * 0.15))
+                    y2 = int(y1 + h_img * 0.09)
+                    
                     if x1 < x < x2 and y1 < y < y2:
                         if anio == 1938:
                             self.trivia_acierto = anio
@@ -464,10 +477,26 @@ class VisorTurismoAR:
                         return
 
             elif self.paso == 5 and self.trivia_fase == 2:
+                if self.bg_opciones_2 is not None:
+                    target_h_bg = h_f * 0.70 # Mantiene el ancho
+                    base_scale_bg = target_h_bg / self.bg_opciones_2.shape[0]
+                    w_bg_px = self.bg_opciones_2.shape[1] * base_scale_bg
+                    # Centrado horizontalmente
+                    x_porc_bg = (w_f - w_bg_px) / 2 / w_f
+                    x_img, y_img = w_f * x_porc_bg, h_f * 0.35 # Empujado hacia abajo para dar espacio a la pregunta
+                    w_img, h_img = w_bg_px, target_h_bg
+                else:
+                    x_img, y_img, w_img, h_img = w_f * 0.20, h_f * 0.35, w_f * 0.60, h_f * 0.70
+
                 for i, nombre in enumerate(self.trivia_opciones_fase2):
-                    x1, y1_base = int(w_f * 0.25), int(h_f * (0.55 + i * 0.08))
-                    x2, y2_base = x1 + 320, y1_base + 40
-                    if x1 < x < x2 and y1_base < y < y2_base:
+                    # Reducimos el ancho para no tapar las flores
+                    x1 = int(x_img + w_img * 0.15)
+                    x2 = int(x_img + w_img * 0.85)
+                    # Bajamos la caja matemática para que coincida con la madera interior
+                    y1 = int(y_img + h_img * (0.19 + i * 0.185))
+                    y2 = int(y1 + h_img * 0.10) # Altura reducida para no salirse de la caja
+                    
+                    if x1 < x < x2 and y1 < y < y2:
                         if nombre == "Justo Manuel Triviña":
                             self.trivia_acierto = nombre
                             self.monedas += 100
@@ -682,79 +711,134 @@ class VisorTurismoAR:
                 # --- RENDERIZADO DE INTERFAZ DE TRIVIA (PASO 5) ---
                 if self.paso == 5:
                     if self.trivia_fase == 1:
-                        # Imagen para la primera trivia (Fase 1: Años)
+                        # 1. Imagen de fondo (Alineada a la derecha, más pequeña)
+                        if self.bg_opciones_1 is not None:
+                            target_h_bg = h_f * 0.65
+                            base_scale_bg = target_h_bg / self.bg_opciones_1.shape[0]
+                            w_bg_px = self.bg_opciones_1.shape[1] * base_scale_bg
+                            # Alinear a la derecha con 2% de margen
+                            x_porc_bg = (w_f - w_bg_px - (w_f * 0.02)) / w_f
+                            
+                            frame = render_alfa(frame, self.bg_opciones_1, x_porc_bg, 0.15, base_scale_bg)
+                            
+                            x_img, y_img = w_f * x_porc_bg, h_f * 0.15
+                            w_img, h_img = w_bg_px, target_h_bg
+                        else:
+                            x_img, y_img, w_img, h_img = w_f * 0.35, h_f * 0.1, w_f * 0.6, h_f * 0.8
+
+                        # 2. Imagen del avatar (Izquierda)
                         if self.avatar_5 is not None:
                             frame = render_alfa(frame, self.avatar_5, 0.02, 0.20, 0.6)
-
-                        # Pregunta animada letra por letra saliendo de la zona de la cabeza
-                        t1 = "PODRIAS RECORDARME EN QUE AÑO"
-                        t2 = "SE TOMO LA FOTO PARA AVANZAR?"
-                        progreso = int(self.anim_frame * 2.5)
+                            
+                        self.anim_frame += 1
                         
-                        if progreso < len(t1):
-                            frame = dibujar_texto_utf8(frame, t1[:progreso], (int(w_f*0.20), int(h_f*0.12)), 20, (0, 0, 0))
-                        else:
-                            frame = dibujar_texto_utf8(frame, t1, (int(w_f*0.20), int(h_f*0.12)), 20, (0, 0, 0))
-                            frame = dibujar_texto_utf8(frame, t2[:max(0, progreso - len(t1))], (int(w_f*0.20), int(h_f*0.17)), 20, (0, 0, 0))
-                        
-                        self.anim_frame += 1 # Incrementar para manejar la animación del texto
-                        
+                        # 3. Lógica de renderizado de las casillas en el lado derecho del mapa
                         for i, anio in enumerate(self.trivia_opciones):
-                            x1, y1_base = int(w_f * 0.72), int(h_f * (0.35 + i * 0.12))
-                            x2, y2_base = x1 + 140, y1_base + 50
+                            # Coordenadas ajustadas para representar el ancho visual real de la caja
+                            x1 = int(x_img + w_img * 0.69)
+                            x2 = int(x_img + w_img * 0.92)
+                            y1_base = int(y_img + h_img * (0.31 + i * 0.15))
+                            y2_base = int(y1_base + h_img * 0.09)
                             
                             hover_op = x1 < self.mouse_x < x2 and y1_base < self.mouse_y < y2_base
-                            # Suavizado de la animación de levante (subida)
-                            self.hover_trivia_anims[i] = min(1.0, self.hover_trivia_anims[i] + 0.3) if hover_op else max(0.0, self.hover_trivia_anims[i] - 0.3)
                             
-                            # Aplicar efecto de levante a las coordenadas de dibujo
-                            y_offset = int(h_f * 0.02 * self.hover_trivia_anims[i])
-                            y1, y2 = y1_base - y_offset, y2_base - y_offset
+                            # Efecto visual semitransparente sobre las opciones
+                            overlay = frame.copy()
+                            draw_rect = False
                             
-                            # Lógica de colores: Rojo si falló, Verde si acertó, Gris si hover
                             if anio in self.trivia_errores:
-                                color_op = (0, 0, 255) # Rojo
+                                cv2.rectangle(overlay, (x1, y1_base), (x2, y2_base), (0, 0, 255), -1) # Rojo
+                                draw_rect = True
                             elif anio == self.trivia_acierto:
-                                color_op = (0, 255, 0) # Verde (solo el correcto)
+                                cv2.rectangle(overlay, (x1, y1_base), (x2, y2_base), (0, 255, 0), -1) # Verde
+                                draw_rect = True
                             elif hover_op:
-                                color_op = (180, 180, 180) # Hover neutro para los demás
-                            else:
-                                color_op = (220, 220, 220) # Gris normal
+                                cv2.rectangle(overlay, (x1, y1_base), (x2, y2_base), (255, 255, 255), -1) # Hover blanco
+                                draw_rect = True
                                 
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color_op, -1)
-                            cv2.putText(frame, str(anio), (x1+35, y1+35), 0, 0.7, (0, 0, 0), 2)
+                            if draw_rect:
+                                cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                                
+                            # Restaurar el texto del año dentro del botón (Centrado matemáticamente perfecto)
+                            texto_anio = str(anio)
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            font_scale = 1.0
+                            thickness = 2
+                            text_size, _ = cv2.getTextSize(texto_anio, font, font_scale, thickness)
+                            text_w, text_h = text_size
+                            
+                            x_text = x1 + ((x2 - x1) - text_w) // 2
+                            y_text = y1_base + ((y2_base - y1_base) + text_h) // 2
+                            
+                            cv2.putText(frame, texto_anio, (x_text, y_text), font, font_scale, (0, 0, 0), thickness)
                     else:
                         # Pregunta 2: El autor (Imagen de fondo + Texto encima)
                         if self.img_pregunta is not None:
-                            frame = render_alfa(frame, self.img_pregunta, 0.20, 0.10, 0.6)
+                            scale_pregunta = 0.55 # Aumentado significativamente el cartel de la pregunta
+                            w_preg_px = self.img_pregunta.shape[1] * scale_pregunta
+                            x_porc_preg = (w_f - w_preg_px) / 2 / w_f
+                            frame = render_alfa(frame, self.img_pregunta, x_porc_preg, 0.02, scale_pregunta)
+                            # Texto ajustado en tamaño (24) y posición para encajar en el cartel grande
+                            text_x = int(w_f * x_porc_preg + w_preg_px * 0.12) # Un tris más a la izquierda
+                            text_y = int(h_f * 0.02 + self.img_pregunta.shape[0] * scale_pregunta * 0.58) # Un poco más arriba (intermedio)
+                            frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (text_x, text_y), 24, (0, 0, 0))
+                        else:
+                            frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.35), int(h_f*0.10)), 26, (0, 0, 0))
                         
-                        frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.28), int(h_f*0.38)), 26, (0, 0, 0))
-                        
+                        # Renderizado del fondo para las opciones de la Fase 2 (Debajo de la pregunta)
+                        if self.bg_opciones_2 is not None:
+                            target_h_bg = h_f * 0.70 # Mantiene el tamaño para que encajen los nombres largos
+                            base_scale_bg = target_h_bg / self.bg_opciones_2.shape[0]
+                            w_bg_px = self.bg_opciones_2.shape[1] * base_scale_bg
+                            # Centrado horizontalmente
+                            x_porc_bg = (w_f - w_bg_px) / 2 / w_f
+                            
+                            frame = render_alfa(frame, self.bg_opciones_2, x_porc_bg, 0.35, base_scale_bg)
+                            
+                            x_img, y_img = w_f * x_porc_bg, h_f * 0.35
+                            w_img, h_img = w_bg_px, target_h_bg
+                        else:
+                            x_img, y_img, w_img, h_img = w_f * 0.20, h_f * 0.35, w_f * 0.60, h_f * 0.70
+
                         # Renderizado de opciones múltiples para la Fase 2
                         for i, nombre in enumerate(self.trivia_opciones_fase2):
-                            x1, y1_base = int(w_f * 0.25), int(h_f * (0.55 + i * 0.08))
-                            x2, y2_base = x1 + 320, y1_base + 40
+                            # Reducimos el ancho para no tapar las flores
+                            x1 = int(x_img + w_img * 0.15)
+                            x2 = int(x_img + w_img * 0.85)
+                            # Bajamos la caja matemática para que coincida con el dibujo
+                            y1_base = int(y_img + h_img * (0.19 + i * 0.185))
+                            y2_base = int(y1_base + h_img * 0.10) # Altura ajustada a la madera interior
                             
                             hover_op = x1 < self.mouse_x < x2 and y1_base < self.mouse_y < y2_base
-                            # Suavizado de la animación
+                            
+                            # Efecto de levantamiento (levanta el texto y el color de fondo)
                             self.hover_trivia_anims_2[i] = min(1.0, self.hover_trivia_anims_2[i] + 0.3) if hover_op else max(0.0, self.hover_trivia_anims_2[i] - 0.3)
+                            y_offset = int(h_f * 0.015 * self.hover_trivia_anims_2[i])
                             
-                            y_offset = int(h_f * 0.01 * self.hover_trivia_anims_2[i])
-                            y1, y2 = y1_base - y_offset, y2_base - y_offset
+                            y1_anim = y1_base - y_offset
+                            y2_anim = y2_base - y_offset
                             
-                            # Lógica de colores
+                            # Efecto visual semitransparente sobre las opciones
+                            overlay = frame.copy()
+                            draw_rect = False
+                            
+                            # Lógica de colores (usando las coordenadas animadas)
                             if nombre in self.trivia_errores:
-                                color_op = (0, 0, 255) # Rojo
+                                cv2.rectangle(overlay, (x1, y1_anim), (x2, y2_anim), (0, 0, 255), -1) # Rojo
+                                draw_rect = True
                             elif nombre == self.trivia_acierto:
-                                color_op = (0, 255, 0) # Verde
-                            elif hover_op:
-                                color_op = (180, 180, 180) # Hover
-                            else:
-                                color_op = (220, 220, 220) # Gris
+                                cv2.rectangle(overlay, (x1, y1_anim), (x2, y2_anim), (0, 255, 0), -1) # Verde
+                                draw_rect = True
                                 
-                            cv2.rectangle(frame, (x1, y1), (x2, y2), color_op, -1)
-                            # Usamos dibujar_texto_utf8 para los nombres por caracteres especiales
-                            frame = dibujar_texto_utf8(frame, nombre, (x1 + 10, y1 + 5), 18, (0, 0, 0))
+                            if draw_rect:
+                                cv2.addWeighted(overlay, 0.35, frame, 0.65, 0, frame)
+                                
+                            # Ajuste de fuente para opciones (centrado perfeccionado)
+                            longitud_estimada = len(nombre) * 6
+                            x_text = x1 + int(((x2 - x1) - longitud_estimada) / 2)
+                            # Como la caja matemática ahora es correcta, centramos en 0.50 y aplicamos la animación
+                            y_text = y1_anim + int((y2_anim - y1_anim) * 0.50) 
+                            frame = dibujar_texto_utf8(frame, nombre, (x_text, y_text), 15, (0, 0, 0))
 
                 if self.paso == self.max_pasos and self.activos['foto_h'] is not None:
                     # Mover la foto histórica para no tapar el avatar
@@ -771,21 +855,28 @@ class VisorTurismoAR:
                 self.hover_back_anim = min(1.0, self.hover_back_anim + 0.3) if hover_back else max(0.0, self.hover_back_anim - 0.3)
                 self.hover_salt_anim = min(1.0, self.hover_salt_anim + 0.3) if hover_salt else max(0.0, self.hover_salt_anim - 0.3)
 
-                # Aplicar efecto de "levante" (sube un poco y crece ligeramente)
+                # Aplicar efecto de "levante" y escalar dinámicamente según la pantalla
+                target_h_nav = h_f * 0.16 # 16% de la altura de la pantalla (botones más grandes)
+
                 if self.btn_sig is not None and self.paso != 5:
-                    y_btn = 0.8 - (0.03 * self.hover_sig_anim) # Sube hasta un 3% de la pantalla
-                    esc_btn = 0.18 + (0.02 * self.hover_sig_anim) # Crece un poco
+                    base_scale = target_h_nav / self.btn_sig.shape[0]
+                    y_btn = 0.8 - (0.03 * self.hover_sig_anim)
+                    esc_btn = base_scale + (0.02 * self.hover_sig_anim)
                     frame = render_alfa(frame, self.btn_sig, 0.75, y_btn, esc_btn)
 
                 if self.btn_back is not None:
+                    base_scale = target_h_nav / self.btn_back.shape[0]
                     y_btn = 0.8 - (0.03 * self.hover_back_anim)
-                    esc_btn = 0.18 + (0.02 * self.hover_back_anim)
+                    esc_btn = base_scale + (0.02 * self.hover_back_anim)
                     frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
 
                 if self.btn_salt is not None and self.paso != 5:
-                    y_btn = 0.8 - (0.03 * self.hover_salt_anim)
-                    esc_btn = 0.18 + (0.02 * self.hover_salt_anim)
-                    frame = render_alfa(frame, self.btn_salt, 0.20, y_btn, esc_btn)
+                    # Multiplicamos la escala por 1.25 para compensar el borde transparente de la imagen
+                    base_scale = (target_h_nav / self.btn_salt.shape[0]) * 1.25
+                    # Movemos Y un poco hacia arriba (0.78) para que el centro del círculo quede alineado
+                    y_btn = 0.78 - (0.03 * self.hover_salt_anim)
+                    esc_btn = base_scale + (0.02 * self.hover_salt_anim)
+                    frame = render_alfa(frame, self.btn_salt, 0.19, y_btn, esc_btn)
 
                 cv2.putText(frame, f"PASO {self.paso} / {self.max_pasos}", (10, 30), 0, 0.6, (255, 255, 255), 2)
 
@@ -798,19 +889,22 @@ class VisorTurismoAR:
                     frame = dibujar_texto_utf8(frame, f"MONEDAS: {self.monedas}", (int(w_f * 0.22), 10), 20, (0, 255, 255))
                 
                 # Lógica de interactividad para el botón de tienda
-                hover_tienda = w_f * 0.86 < self.mouse_x < w_f * 0.94 and h_f * 0.01 < self.mouse_y < h_f * 0.08
+                hover_tienda = w_f * 0.85 < self.mouse_x < w_f * 0.98 and h_f * 0.01 < self.mouse_y < h_f * 0.15
                 self.hover_tienda_anim = min(1.0, self.hover_tienda_anim + 0.3) if hover_tienda else max(0.0, self.hover_tienda_anim - 0.3)
 
                 if self.btn_tienda is not None:
-                    # Efecto de levante y escala para el icono de tienda
+                    # El botón de tienda será ligeramente más pequeño (14% de la altura) para la esquina
+                    target_h_tienda = h_f * 0.14
+                    base_scale_tienda = target_h_tienda / self.btn_tienda.shape[0]
+                    
                     y_tienda = 0.02 - (0.01 * self.hover_tienda_anim)
-                    esc_tienda = 0.03 + (0.01 * self.hover_tienda_anim)
-                    frame = render_alfa(frame, self.btn_tienda, 0.88, y_tienda, esc_tienda)
+                    esc_tienda = base_scale_tienda + (0.02 * self.hover_tienda_anim)
+                    frame = render_alfa(frame, self.btn_tienda, 0.86, y_tienda, esc_tienda)
                 else:
                     # Fallback visual si no se encuentra 'shop.png' (Mantiene la funcionalidad)
                     color_tienda = (0, 140, 255) if not self.tienda_abierta else (0, 0, 255)
-                    cv2.rectangle(frame, (int(w_f*0.88), int(h_f*0.02)), (int(w_f*0.93), int(h_f*0.08)), color_tienda, -1)
-                    cv2.putText(frame, "T", (int(w_f*0.89), int(h_f*0.06)), 0, 0.4, (255, 255, 255), 1)
+                    cv2.rectangle(frame, (int(w_f*0.75), int(h_f*0.02)), (int(w_f*0.85), int(h_f*0.08)), color_tienda, -1)
+                    cv2.putText(frame, "T", (int(w_f*0.78), int(h_f*0.06)), 0, 0.4, (255, 255, 255), 1)
 
                 if self.tienda_abierta:
                     # Fondo semitransparente para el menú
