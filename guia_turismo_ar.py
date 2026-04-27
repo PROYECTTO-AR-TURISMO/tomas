@@ -169,6 +169,7 @@ class VisorTurismoAR:
         self.hover_popup_anim = 0.0 # Animación para el efecto de onda del pop-up
         self.hover_trivia_anims_2 = [0.0, 0.0, 0.0, 0.0] # Animación para la segunda trivia
         self.hover_mapa_anim = 0.0 # Efecto de fluido/hundimiento para el mapa
+        self.animales_stampida = [] # Lista para manejar la estampida del paso 2
         
         # Cargar botones de interfaz
         self.btn_sig = self._buscar_archivo_ui('next.png')
@@ -277,7 +278,7 @@ class VisorTurismoAR:
             return False
         
         self.sitio_actual_id = sitio_id
-        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'porton': None, 'suelo_textura': None}
+        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'vaca_gif': None, 'iguana_gif': None}
         archivos = os.listdir(path_sitio)
         
         for i in range(1, self.max_pasos + 1):
@@ -297,6 +298,13 @@ class VisorTurismoAR:
         
         if 'historica.png' in [f.lower() for f in archivos]:
             self.activos['foto_h'] = cv2.imread(os.path.join(path_sitio, 'historica.png'), cv2.IMREAD_UNCHANGED)
+
+        # Cargar GIFs de animales para la estampida (Paso 2)
+        vaca_path = self._buscar_ruta_recurso('vaca.gif', sitio_id)
+        if vaca_path: self.activos['vaca_gif'] = GifHandler(vaca_path)
+        
+        iguana_path = self._buscar_ruta_recurso('iguana.gif', sitio_id)
+        if iguana_path: self.activos['iguana_gif'] = GifHandler(iguana_path)
 
         # Cargar suelo específico si existe (suelo.png)
         if 'suelo.png' in [f.lower() for f in archivos]:
@@ -367,6 +375,14 @@ class VisorTurismoAR:
                 
         return True
 
+    def _buscar_ruta_recurso(self, nombre, sitio_id):
+        """Busca un archivo en la carpeta del sitio o en UI general."""
+        rutas = [os.path.join(self.base_dir, 'assets', 'sitios', sitio_id, nombre),
+                 os.path.join(self.base_dir, 'assets', 'ui', nombre)]
+        for r in rutas:
+            if os.path.exists(r): return r
+        return None
+
     def reproducir_texto_paso(self, mensaje_extra=""):
         if self.paso == 5:
             if self.trivia_fase == 1:
@@ -412,6 +428,7 @@ class VisorTurismoAR:
         self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0]
         self.hover_trivia_anims_2 = [0.0, 0.0, 0.0, 0.0]
         self.hover_mapa_anim = 0.0
+        self.animales_stampida = []
         # Reiniciar frames de los GIFs activos para que empiecen de cero
         for handler in list(self.activos['avatars'].values()) + list(self.activos['burbujas'].values()):
             handler.current_frame = 0
@@ -631,6 +648,29 @@ class VisorTurismoAR:
                     suelo_warped = cv2.warpPerspective(tex_s, M_suelo, (w_f, h_f), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
                     frame = render_alfa(frame, suelo_warped, 0, 0, 1.0)
 
+                # --- LÓGICA DE ESTAMPIDA (PASO 2) ---
+                if self.paso == 2:
+                    av_h = self.activos['avatars'].get(2)
+                    # Disparar si el avatar desapareció y no hay animales aún
+                    if av_h and av_h.current_frame >= len(av_h.frames) - 1 and not self.animales_stampida:
+                        # Creamos una mezcla de vacas e iguanas
+                        for _ in range(3): # 3 vacas
+                            self.animales_stampida.append({'t': 'vaca', 'x': 0.12, 'y': 0.55 + random.uniform(0, 0.1), 's': random.uniform(0.02, 0.04), 'esc': 0.3})
+                        for _ in range(5): # 5 iguanas
+                            self.animales_stampida.append({'t': 'iguana', 'x': 0.12, 'y': 0.70 + random.uniform(0, 0.05), 's': random.uniform(0.03, 0.06), 'esc': 0.15})
+                    
+                    # Renderizar animales (detrás del portón)
+                    if self.animales_stampida:
+                        v_frame = self.activos['vaca_gif'].get_frame() if self.activos.get('vaca_gif') else None
+                        i_frame = self.activos['iguana_gif'].get_frame() if self.activos.get('iguana_gif') else None
+                        
+                        for animal in self.animales_stampida:
+                            animal['x'] += animal['s'] # Mover a la derecha
+                            img = v_frame if animal['t'] == 'vaca' else i_frame
+                            if img is not None:
+                                # Dibujamos los animales saliendo del portón
+                                frame = render_alfa(frame, img, animal['x'], animal['y'], animal['esc'])
+
                 # --- RENDERIZADO DEL PORTÓN (PASO 2) ---
                 if self.paso == 2 and self.activos.get('porton') is not None:
                     # Portón más a la izquierda para asegurar visibilidad completa
@@ -778,8 +818,8 @@ class VisorTurismoAR:
                     frame = render_alfa(frame, self.btn_sig, 0.75, y_btn, esc_btn)
 
                 if self.btn_back is not None:
-                    y_btn = 0.8 - (0.03 * self.hover_back_anim)
-                    esc_btn = 0.18 + (0.02 * self.hover_back_anim)
+                    y_btn = 0.82 - (0.03 * self.hover_back_anim) # Bajado ligeramente a 0.82
+                    esc_btn = 0.18 + (0.02 * self.hover_back_anim) # Restaurado al tamaño de los otros botones
                     frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
 
                 if self.btn_salt is not None and self.paso != 5:
