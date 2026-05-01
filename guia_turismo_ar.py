@@ -1,11 +1,14 @@
+import pyttsx3
 from numpy.fft import fftfreq
 import cv2
 import numpy as np
 import random
 import os
 from PIL import Image, ImageSequence, ImageDraw, ImageFont
-import pyttsx3
+import asyncio
+import edge_tts
 import threading
+import time
 import queue
 import pytesseract
 import pygame
@@ -22,27 +25,42 @@ class TTSManager:
         self.thread.start()
 
     def run(self):
+        # Creamos un loop de eventos de asyncio para manejar la biblioteca edge-tts
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        async def procesar_audio(text):
+            try:
+                # Usamos la voz 'Gonzalo' con la velocidad normal (rate="+0%")
+                voice = "es-CO-GonzaloNeural"
+                communicate = edge_tts.Communicate(text, voice, rate="+0%")
+                temp_file = "speech_temp.mp3"
+                await communicate.save(temp_file)
+                
+                # Usamos Sound y el Canal 1 para no interrumpir la música de fondo
+                if not pygame.mixer.get_init(): pygame.mixer.init()
+                voz_audio = pygame.mixer.Sound(temp_file)
+                canal = pygame.mixer.Channel(1) 
+                canal.play(voz_audio)
+                
+                while canal.get_busy():
+                    await asyncio.sleep(0.1)
+            except Exception as e:
+                print(f"  [SISTEMA] Fallo en voz neural. Usando motor offline... {e}")
+                try:
+                    # pyttsx3 no necesita internet
+                    engine = pyttsx3.init()
+                    engine.setProperty('rate', 150)
+                    engine.say(text)
+                    engine.runAndWait()
+                except Exception as e_local:
+                    print(f"  [ERROR] Fallo total del sistema de audio: {e_local}")
+
         while True:
             text = self.tts_queue.get()
             if text is None:
                 break
-            try:
-                # Inicializar el motor por cada frase ayuda a evitar congelamientos en Windows
-                engine = pyttsx3.init()
-                
-                # Ajustar a voz masculina y velocidad más amigable para un recorrido
-                try:
-                    engine.setProperty('rate', 160)
-                    voz_masculina = r'HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Speech_OneCore\Voices\Tokens\MSTTS_V110_esES_PabloM'
-                    engine.setProperty('voice', voz_masculina)
-                except:
-                    pass
-                
-                engine.say(text)
-                engine.runAndWait()
-                del engine
-            except Exception as e:
-                print(f"  [ERROR TTS] {e}")
+            loop.run_until_complete(procesar_audio(text))
 
     def decir(self, text):
         while not self.tts_queue.empty():
@@ -91,18 +109,16 @@ class GifHandler:
 
     def get_frame(self):
         if not self.frames: return None
-        frame = self.frames[self.current_frame]
         
-        # Avanzar el doble de rápido (2 frames por ciclo)
-        for _ in range(2):
-            if self.current_frame < len(self.frames) - 1:
-                self.current_frame += 1
-            
-        return frame
+        # Avanzar frame solo si no es el último (para que no se repita solo)
+        if self.current_frame < len(self.frames) - 1:
+            self.current_frame += 1
+
+        return self.frames[self.current_frame]
 
 # --- FUNCIÓN DE RENDERIZADO CON CANAL ALFA ---
 def render_alfa(fondo, img, x_porcentaje, y_porcentaje, escala):
-    if img is None: return fondo
+    if img is None or escala <= 0: return fondo # Evita cierre si la escala es 0 o negativa
     try:
         # Si la imagen no tiene canal alfa (3 canales), le agregamos uno opaco para evitar errores
         if len(img.shape) == 3 and img.shape[2] == 3:
@@ -130,7 +146,8 @@ def render_alfa(fondo, img, x_porcentaje, y_porcentaje, escala):
                                         (1.0 - alpha) * region_fondo[:, :, canal])
             
         return fondo
-    except:
+    except Exception as e:
+        # print(f"Error en render_alfa: {e}") # Opcional para debug
         return fondo
 
 def dibujar_texto_utf8(frame, texto, posicion, tamano, color_bgr):
@@ -158,6 +175,39 @@ class VisorTurismoAR:
         self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
         self.detector = cv2.QRCodeDetector()
         
+        self.img_mapa_general = self._buscar_archivo_ui('mapa_monteria.png')
+        self.qr_detectado_persistente = False
+        self.icon_anims = [] # Control de fade-in para iconos
+        # Asegurar canal alfa para que el mapa pueda ser transparente en los bordes
+        if self.img_mapa_general is not None and self.img_mapa_general.shape[2] == 3:
+            self.img_mapa_general = cv2.cvtColor(self.img_mapa_general, cv2.COLOR_BGR2BGRA)
+            
+        # Obtener dimensiones para cálculos de precisión
+        h_m, w_m = self.img_mapa_general.shape[:2] if self.img_mapa_general is not None else (1000, 1000)
+
+        # --- NUEVAS VARIABLES PARA SELECCIÓN DE SITIO ---
+        self.modo_seleccion = False  # Ahora comenzamos escaneando el QR para "desbloquear" el mapa
+        self.anim_mapa_progreso = 0.0 # 0.0 a 1.0 (animación de apertura)
+        self.mapa_matrix = None # Guardará la perspectiva actual para los clics
+        self.qr_anchor_points = None 
+        self.qr_last_seen_points = None # Para suavizado de movimiento
+        self.sitios_turisticos = [ # Lista de sitios turísticos con sus propiedades
+            {"id": "sitio1", "nombre": "Ronda del Sinú", "x_rel": 0.40, "y_rel": 0.25, "calibrated_manually": True}, # Posición ajustada y sin texto específico
+            {"id": "sitio2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
+        ] # Se elimina "Pasaje del Sol"
+        self.icon_anims = [0.0] * len(self.sitios_turisticos)
+        self.img_pin = self._buscar_archivo_ui('pin.png')
+        self.img_pin_parque = self._buscar_archivo_ui('pin_parque.png')
+        self.img_pin_iglesia = self._buscar_archivo_ui('pin_iglesia.png')
+
+        # Validación de activos para ayudarte a debuguear
+        if self.img_pin_parque is None: print("  [AVISO] No se encontró 'pin_parque.png' en assets/ui/")
+        if self.img_pin_iglesia is None: print("  [AVISO] No se encontró 'pin_iglesia.png' en assets/ui/")
+        if self.img_mapa_general is None: print("  [AVISO] No se encontró 'mapa_monteria.png' en assets/ui/")
+
+        # Intentar auto-localizar los nombres en el mapa usando OCR para posicionar los pines
+        self._calibrar_pines_por_ocr()
+
         self.guia_activo = False
         self.paso = 1
         self.max_pasos = 6
@@ -204,6 +254,7 @@ class VisorTurismoAR:
         self.hover_back_anim = 0.0
         self.hover_salt_anim = 0.0
         self.hover_tienda_anim = 0.0
+        self.last_avatar_bbox = None # Almacena (x, y, w, h) del último avatar renderizado para detección de clic
 
         # Sistema de Recompensas y Tienda
         self.monedas = 0
@@ -228,6 +279,34 @@ class VisorTurismoAR:
 
         self.trivia_fase = 1 # 1: Año, 2: Autor
         self.input_texto = "" # Para almacenar lo que el usuario escribe
+
+    def _calibrar_pines_por_ocr(self):
+        """Intenta localizar las coordenadas de los sitios buscando el texto en la imagen del mapa."""
+        if self.img_mapa_general is None: return
+        print("  [SISTEMA] Escaneando mapa para localizar nombres de sitios...")
+        try:
+            # Convertir a escala de grises para mejorar la precisión del OCR
+            gray = cv2.cvtColor(self.img_mapa_general, cv2.COLOR_BGR2GRAY)
+            # Tesseract busca el texto y devuelve las cajas delimitadoras
+            dict_ocr = pytesseract.image_to_data(gray, lang='spa', output_type=pytesseract.Output.DICT)
+            
+            h_m, w_m = gray.shape[:2]
+            
+            for i in range(len(dict_ocr['text'])):
+                palabra = dict_ocr['text'][i].lower().strip()
+                if len(palabra) < 4: continue # Ignorar palabras muy cortas
+                
+                for sitio in self.sitios_turisticos:
+                    # Saltar sitios que han sido calibrados manualmente
+                    if sitio.get("calibrated_manually", False):
+                        continue
+                    if palabra in sitio['nombre'].lower():
+                        # Calculamos el centro relativo basado en el hallazgo del OCR
+                        sitio['x_rel'] = (dict_ocr['left'][i] + dict_ocr['width'][i] / 2) / w_m
+                        sitio['y_rel'] = (dict_ocr['top'][i] + dict_ocr['height'][i] / 2) / h_m
+                        print(f"  [MAPA] Detectado '{sitio['nombre']}' en mapa: x={sitio['x_rel']:.2f}, y={sitio['y_rel']:.2f}")
+        except Exception as e:
+            print(f"  [AVISO] No se pudo auto-calibrar el mapa por OCR: {e}")
 
     def dibujar_sombra(self, frame, cx, cy, rx, ry):
         """Dibuja una elipse semitransparente como sombra bajo los personajes."""
@@ -436,7 +515,66 @@ class VisorTurismoAR:
         # Actualizar posición del mouse siempre
         self.mouse_x, self.mouse_y = x, y
         
+        if event == cv2.EVENT_LBUTTONDOWN and self.modo_seleccion and self.anim_mapa_progreso >= 1.0 and self.mapa_matrix is not None:
+            # Lógica para elegir sitio en el mapa con perspectiva
+            h_m, w_m = self.img_mapa_general.shape[:2]
+            for sitio in self.sitios_turisticos:
+                # Transformar coordenadas relativas del sitio a pantalla usando la matriz actual
+                pt_src = np.array([[[sitio['x_rel'] * w_m, sitio['y_rel'] * h_m]]], dtype=np.float32)
+                pt_dst = cv2.perspectiveTransform(pt_src, self.mapa_matrix)
+                px, py = pt_dst[0][0]
+
+                # Si el clic está cerca del pin (30px de radio)
+                if np.sqrt((x - px)**2 + (y - py)**2) < 30:
+                    if self.cargar_activos_sitio(sitio['id']):
+                        self.modo_seleccion = False
+                        self.guia_activo = True
+                        self._cambiar_paso(1)
+                    return
+
         if event == cv2.EVENT_LBUTTONDOWN and self.guia_activo:
+            # --- LÓGICA DE NAVEGACIÓN (PRIORIDAD MÁXIMA PARA EVITAR BLOQUEOS) ---
+            if y > h_f * 0.75:
+                # Botón Atrás
+                if x < w_f * 0.18: 
+                    if self.paso > 1:
+                        if self.paso == 5 and self.trivia_fase == 2:
+                            self.trivia_fase = 1
+                            self._cambiar_paso(5)
+                        else:
+                            self._cambiar_paso(self.paso - 1)
+                    return
+                # Botón Siguiente (Derecha)
+                elif x > w_f * 0.7 and self.paso != 5:
+                    if self.paso == self.max_pasos:
+                        self.guia_activo = False
+                        self.modo_seleccion = True
+                        self.anim_mapa_progreso = 0.0
+                    else:
+                        self._cambiar_paso(self.paso + 1)
+                    return
+                # Botón Saltar
+                elif 0.18 * w_f <= x < 0.38 * w_f and self.paso != 5:
+                    self._cambiar_paso(self.max_pasos)
+                    return
+
+            # --- DETECCIÓN DE CLIC EN EL AVATAR ---
+            if self.last_avatar_bbox:
+                ax, ay, aw, ah = self.last_avatar_bbox
+                if ax < x < ax + aw and ay < y < ay + ah:
+                    av_handler = self.activos['avatars'].get(self.paso)
+                    if av_handler:
+                        av_handler.current_frame = 0 # Reiniciar animación del GIF
+                    
+                    # También reiniciamos la burbuja de texto si existe
+                    bu_handler = self.activos['burbujas'].get(self.paso)
+                    if bu_handler:
+                        bu_handler.current_frame = 0
+                        
+                        self.reproducir_texto_paso() # Volver a reproducir el audio
+                    return # Consumir el evento de clic para evitar que se procese como un clic de botón
+
+
             # Botón Tienda (Arriba a la derecha, ajustado para el nuevo tamaño)
             if w_f * 0.85 < x < w_f * 0.98 and h_f * 0.01 < y < h_f * 0.15:
                 self.tienda_abierta = not self.tienda_abierta
@@ -524,31 +662,6 @@ class VisorTurismoAR:
                             self.tts.decir("Ese no es el nombre correcto. Intenta de nuevo.")
                         return
 
-            # Lógica de botones de navegación inferior
-            if y > h_f * 0.75:
-                # Botón Atrás (Izquierda) - Ahora disponible durante las trivias
-                if x < w_f * 0.18:
-                    if self.paso > 1:
-                        # Si estamos en la fase 2 de la trivia, regresar a la fase 1
-                        if self.paso == 5 and self.trivia_fase == 2:
-                            self.trivia_fase = 1
-                            self.input_texto = ""
-                            self._cambiar_paso(5)
-                        else:
-                            self._cambiar_paso(self.paso - 1)
-                
-                # Los botones Siguiente y Saltar siguen bloqueados hasta completar la trivia
-                elif self.paso != 5:
-                    # Botón Siguiente (Derecha)
-                    if x > w_f * 0.7:
-                        if self.paso < self.max_pasos:
-                            self._cambiar_paso(self.paso + 1)
-                        else:
-                            self.guia_activo = False # Salir si se presiona siguiente en el último paso
-                    # Botón Saltar (Al lado de Atrás)
-                    elif 0.18 * w_f <= x < 0.38 * w_f:
-                        self._cambiar_paso(self.max_pasos)
-
     def run(self):
         cv2.namedWindow("VISOR_TURISMO_AR")
         while True:
@@ -558,12 +671,129 @@ class VisorTurismoAR:
             h_f, w_f, _ = frame.shape
             cv2.setMouseCallback("VISOR_TURISMO_AR", self.mouse_callback, param=(h_f, w_f))
 
-            if not self.guia_activo:
+            # --- DETECCIÓN CONTINUA PARA ANCLAJE ---
+            data, points, _ = self.detector.detectAndDecode(frame)
+            
+            if points is not None and len(points) > 0:
+                self.qr_anchor_points = points[0]
+                self.qr_last_seen_points = points[0]
+                self.qr_detectado_persistente = True
+                # Si detectamos un nuevo QR y no hay nada activo, iniciamos animación
+                if data and not self.guia_activo and not self.modo_seleccion:
+                    self.modo_seleccion = True
+                    self.anim_mapa_progreso = 0.0
+                    self.icon_anims = [0.0] * len(self.sitios_turisticos)
+            else:
+                self.qr_detectado_persistente = False
+
+            if self.modo_seleccion:
+                # --- LÓGICA DE PERSISTENCIA ---
+                # El mapa se abre de forma fluida hasta el final y persiste en pantalla.
+                # Ya no se cierra automáticamente ni vuelve al escáner al perder de vista el QR,
+                # permitiendo que el usuario interactúe con los pines con total comodidad.
+                self.anim_mapa_progreso = min(1.0, self.anim_mapa_progreso + 0.01)
+
+                # --- RENDERIZADO DEL MAPA CON APERTURA DE PAPEL ---
+                if self.img_mapa_general is not None and self.qr_last_seen_points is not None:
+                    h_m, w_m = self.img_mapa_general.shape[:2]
+                    
+                    # Easing Out Quartic para una transición muy fluida
+                    t = self.anim_mapa_progreso
+                    e_prog = 1 - (1 - t)**4 
+
+                    pts = self.qr_last_seen_points # TL, TR, BR, BL
+                    tl, tr, bl = pts[0], pts[1], pts[3]
+                    
+                    # Vectores de dirección basados en el QR
+                    vx = tr - tl
+                    vy = bl - tl
+                    cx, cy = np.mean(pts[:, 0]), np.mean(pts[:, 1])
+                    
+                    escala_mapa = 5.0
+                    
+                    # El papel se expande desde el centro de forma suave
+                    src_p = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
+                    
+                    # Factor de expansión (tamaño actual determinado por e_prog)
+                    esc_actual = escala_mapa * e_prog
+                    
+                    dst_p = np.float32([
+                        [cx + (-0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0],
+                         cy + (-0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
+                        [cx + (0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0],
+                         cy + (0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
+                        [cx + (-0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0],
+                         cy + (-0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]],
+                        [cx + (0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0],
+                         cy + (0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]]
+                    ])
+
+                    self.mapa_matrix = cv2.getPerspectiveTransform(src_p, dst_p)
+                    mapa_warp = cv2.warpPerspective(self.img_mapa_general, self.mapa_matrix, (w_f, h_f), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+                    
+                    # Añadimos un desvanecimiento suave durante el crecimiento para mayor fluidez
+                    if e_prog < 1.0:
+                        mapa_warp[:, :, 3] = (mapa_warp[:, :, 3] * e_prog).astype(np.uint8)
+                    
+                    frame = render_alfa(frame, mapa_warp, 0, 0, 1.0)
+
+                # --- FASE 4: APARICIÓN SECUENCIAL DE ICONOS ---
+                if self.anim_mapa_progreso >= 0.95 and self.mapa_matrix is not None:
+                    for i, sitio in enumerate(self.sitios_turisticos):
+                        # Delay secuencial para cada icono
+                        delay = i * 0.2
+                        if self.anim_mapa_progreso > (0.95 + delay):
+                            self.icon_anims[i] = min(1.0, self.icon_anims[i] + 0.05)
+                        
+                        alpha_icon = self.icon_anims[i]
+                        if alpha_icon <= 0: continue
+
+                        pt_src = np.array([[[sitio['x_rel'] * w_m, sitio['y_rel'] * h_m]]], dtype=np.float32)
+                        pt_dst = cv2.perspectiveTransform(pt_src, self.mapa_matrix)
+                        px, py = pt_dst[0][0]
+
+                        float_y = np.sin(self.anim_frame * 0.12 + i) * 8
+                        py_f = py + float_y - (20 * (1.0 - alpha_icon)) # Eliminado bounce_offset
+
+                        dist = np.sqrt((self.mouse_x - px)**2 + (self.mouse_y - py_f)**2)
+                        esc_pin = 0.15 if dist < 40 else 0.10
+                        
+                        img_a_usar = self.img_pin
+                        if sitio['id'] == 'sitio1' and self.img_pin_parque is not None:
+                            img_a_usar = self.img_pin_parque
+                        elif sitio['id'] == 'sitio2' and self.img_pin_iglesia is not None:
+                            img_a_usar = self.img_pin_iglesia
+
+                        if img_a_usar is not None:
+                            # --- DIBUJAR SOMBRA EN EL MAPA ---
+                            s_ratio = max(0.2, 1.0 - (abs(float_y) / 250)) # Eliminado bounce_offset
+                            self.dibujar_sombra(frame, px, py, int(25 * esc_pin * 10 * s_ratio), int(8 * esc_pin * 10 * s_ratio))
+
+                            # Ajustar anclaje para iconos más pequeños
+                            frame = render_alfa(frame, img_a_usar, (px/w_f) - 0.025, (py_f/h_f) - 0.06, esc_pin)
+                        
+                        # Etiqueta del sitio
+                        color_txt = (255, 255, 255) if dist < 40 else (200, 200, 200)
+                        
+                        if 'tx_rel' in sitio:
+                            pt_t_src = np.array([[[sitio['tx_rel'] * w_m, sitio['ty_rel'] * h_m]]], dtype=np.float32)
+                            pt_t_dst = cv2.perspectiveTransform(pt_t_src, self.mapa_matrix)
+                            tx, ty = pt_t_dst[0][0]
+                            pos_txt = (int(tx), int(ty + float_y)) # Eliminado bounce_offset
+                        else:
+                            pos_txt = (int(px - 50), int(py_f + 10))
+                            
+                        frame = dibujar_texto_utf8(frame, sitio['nombre'], pos_txt, 16, color_txt)
+
+                cv2.putText(frame, "Selecciona un destino en el mapa", (int(w_f*0.25), 40), 0, 0.8, (255, 255, 255), 2)
+
+                self.last_avatar_bbox = None # No hay avatar visible en modo selección
+            elif not self.guia_activo:
                 # Renderizar la imagen decorativa detrás del visor del escáner
                 if self.img_escaner is not None:
                     # Forzamos que la imagen ocupe exactamente el tamaño de la pantalla
                     img_full = cv2.resize(self.img_escaner, (w_f, h_f), interpolation=cv2.INTER_AREA)
-                    frame = render_alfa(frame, img_full, 0.0, -0.05, 1.0)
+                    frame = render_alfa(frame, img_full, 0.0, 0.0, 1.0)
                 
                 cv2.putText(frame, "ESCANEE QR", (int(w_f * 0.38), int(h_f * 0.98)), 0, 0.7, (0, 255, 0), 2)
                 # Resetear trivia y tienda al volver a escanear
@@ -572,13 +802,11 @@ class VisorTurismoAR:
                 self.trivia_errores = []
                 self.trivia_acierto = None
                 self.hover_trivia_anims = [0.0, 0.0, 0.0, 0.0]
+                self.last_avatar_bbox = None # No hay avatar visible cuando no está activo el guía
                 self.tienda_abierta = False
-                data, _, _ = self.detector.detectAndDecode(frame)
-                if data:
-                    if self.cargar_activos_sitio(data):
-                        self.guia_activo = True
-                        self._cambiar_paso(1)
             else:
+                self.last_avatar_bbox = None # Resetear en cada frame para evitar clics fantasma
+                
                 # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
                 if self.paso == 4 and self.activos.get('mapa_img') is not None:
                     # Configuración de tiempos
@@ -662,7 +890,6 @@ class VisorTurismoAR:
                         x_pop = 0.45 - (0.35 * pop_prog) # Empieza cerca del centro y se desplaza a la izquierda
                         frame = render_alfa(frame, self.activos['pop_up_img'], x_pop, y_pop, esc_pop)
                     
-                    self.anim_frame += 1
                 # ------ FIN LÓGICA PASO 4 ------
 
                 # --- RENDERIZADO DEL SUELÓN (PASO 2) ---
@@ -740,6 +967,7 @@ class VisorTurismoAR:
                         self.dibujar_sombra(frame, x_px + w_esc // 2, y_px + h_esc - ry_sombra, w_esc // 2.5, ry_sombra)
                         
                         # Renderizar el avatar encima
+                        self.last_avatar_bbox = (x_px, y_px, w_esc, h_esc) # Almacenar bbox del avatar
                         frame = render_alfa(frame, img_av, x_porc, y_porc, esc)
                         
                         # Renderizar burbuja de texto encima del avatar
@@ -769,8 +997,6 @@ class VisorTurismoAR:
                         # 2. Imagen del avatar (Izquierda)
                         if self.avatar_5 is not None:
                             frame = render_alfa(frame, self.avatar_5, 0.02, 0.20, 0.6)
-                            
-                        self.anim_frame += 1
                         
                         # 3. Lógica de renderizado de las casillas en el lado derecho del mapa
                         for i, anio in enumerate(self.trivia_opciones):
@@ -821,6 +1047,7 @@ class VisorTurismoAR:
                             # Texto ajustado en tamaño (24) y posición para encajar en el cartel grande
                             text_x = int(w_f * x_porc_preg + w_preg_px * 0.12) # Un tris más a la izquierda
                             text_y = int(h_f * 0.02 + self.img_pregunta.shape[0] * scale_pregunta * 0.58) # Un poco más arriba (intermedio)
+                            
                             frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (text_x, text_y), 24, (0, 0, 0))
                         else:
                             frame = dibujar_texto_utf8(frame, "¿Quien tomó esta foto?", (int(w_f*0.35), int(h_f*0.10)), 26, (0, 0, 0))
@@ -965,6 +1192,7 @@ class VisorTurismoAR:
                         frame = dibujar_texto_utf8(frame, txt, (w_f - 240, y_box + 15), 16, (255, 255, 255))
 
             cv2.imshow("VISOR_TURISMO_AR", frame)
+            self.anim_frame += 1 # Incremento global para todas las animaciones
             key = cv2.waitKey(1) & 0xFF
             if key == ord('q'): break
             
