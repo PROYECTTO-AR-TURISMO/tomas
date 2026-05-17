@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import os
 import pytesseract
-from utils import load_ui_asset, render_alfa, dibujar_sombra
+from utils import load_ui_asset, render_alfa, dibujar_sombra, dibujar_texto_utf8
 
 class MapSystem:
     def __init__(self, base_dir):
@@ -17,12 +17,14 @@ class MapSystem:
         self.modo_seleccion = False  # Ahora comenzamos escaneando el QR para "desbloquear" el mapa
         self.anim_mapa_progreso = 0.0 # 0.0 a 1.0 (animación de apertura)
         self.mapa_matrix = None # Guardará la perspectiva actual para los clics
+        self.map_zoom_factor = 1.0 # Factor de escala para vista fija
+        self.target_zoom = 1.0
         self.qr_anchor_points = None 
         self.qr_last_seen_points = None # Para suavizado de movimiento
         
         self.sitios_turisticos = [ # Lista de sitios turísticos con sus propiedades
             {"id": "sitio1", "nombre": "Ronda del Sinú", "x_rel": 0.40, "y_rel": 0.25, "calibrated_manually": True}, # Posición ajustada y sin texto específico
-            {"id": "sitio2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
+            {"id": "sitio_2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
         ]
         self.icon_anims = [0.0] * len(self.sitios_turisticos) # Control de fade-in para iconos
         
@@ -73,7 +75,14 @@ class MapSystem:
         
         if points is not None and len(points) > 0:
             self.qr_anchor_points = points[0]
-            self.qr_last_seen_points = points[0]
+            
+            # SUAVIZADO DE ANCLAJE: Aplicamos LERP (Linear Interpolation)
+            if self.qr_last_seen_points is None:
+                self.qr_last_seen_points = points[0]
+            else:
+                alpha = 0.25 # Factor de suavizado (más bajo = más estable pero más lento)
+                self.qr_last_seen_points = self.qr_last_seen_points * (1 - alpha) + points[0] * alpha
+
             self.qr_detectado_persistente = True
             # Si detectamos un nuevo QR y no hay nada activo, iniciamos animación
             if data and not guia_activo and not self.modo_seleccion:
@@ -83,78 +92,87 @@ class MapSystem:
         else:
             self.qr_detectado_persistente = False
 
-    def render_map_animation(self, frame, w_f, h_f, mouse_x, mouse_y, anim_frame, animation_manager):
-        """Renderiza el mapa con la animación de apertura y los pines."""
+    def render_map_animation(self, frame, w_f, h_f, mouse_x, mouse_y, anim_frame, animation_manager, ronda_completada):
+        """Renderiza el mapa con comportamiento dual: AR con QR al inicio, 2D estable con zoom al completar."""
         if self.modo_seleccion:
-            # LÓGICA DE PERSISTENCIA: El mapa se abre de forma fluida hasta el final y persiste.
-            self.anim_mapa_progreso = min(1.0, self.anim_mapa_progreso + 0.01) # Apertura fluida
+            # Control de animación de aparición
+            if self.qr_detectado_persistente:
+                self.anim_mapa_progreso = min(1.0, self.anim_mapa_progreso + 0.05)
+            elif ronda_completada:
+                self.anim_mapa_progreso = 1.0
+            else:
+                self.anim_mapa_progreso = max(0.0, self.anim_mapa_progreso - 0.1)
 
-            # RENDERIZADO DEL MAPA CON APERTURA DE PAPEL
-            if self.img_mapa_general is not None and self.qr_last_seen_points is not None:
-                h_m, w_m = self.img_mapa_general.shape[:2]
-                
-                # Easing Out Quartic para una transición muy fluida
-                t = self.anim_mapa_progreso
-                e_prog = 1 - (1 - t)**4 
+            if self.anim_mapa_progreso <= 0 or self.img_mapa_general is None:
+                return frame
 
-                pts = self.qr_last_seen_points # TL, TR, BR, BL
-                tl, tr, bl = pts[0], pts[1], pts[3]
+            h_m, w_m = self.img_mapa_general.shape[:2]
+
+            if ronda_completada:
+                # --- MODO 2D ESTABLE CON ZOOM (NUEVO) ---
+                self.map_zoom_factor += (self.target_zoom - self.map_zoom_factor) * 0.15
+                current_scale = self.map_zoom_factor * self.anim_mapa_progreso
                 
-                # Vectores de dirección basados en el QR
-                vx = tr - tl
-                vy = bl - tl
-                cx, cy = np.mean(pts[:, 0]), np.mean(pts[:, 1])
+                base_w_scale = (w_f * 0.85) / w_m
+                base_h_scale = (h_f * 0.85) / h_m
+                final_base_scale = min(base_w_scale, base_h_scale) * current_scale
                 
-                escala_mapa = 5.0
+                target_w, target_h = int(w_m * final_base_scale), int(h_m * final_base_scale)
+                x_off, y_off = (w_f - target_w) // 2, (h_f - target_h) // 2
+
+                map_render = cv2.resize(self.img_mapa_general, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+                if self.anim_mapa_progreso < 1.0 and map_render.shape[2] == 4:
+                    map_render[:, :, 3] = (map_render[:, :, 3] * self.anim_mapa_progreso).astype(np.uint8)
                 
-                # El papel se expande desde el centro de forma suave
+                frame = render_alfa(frame, map_render, x_off/w_f, y_off/h_f, 1.0)
+                self.mapa_matrix = np.float32([[final_base_scale, 0, x_off], [0, final_base_scale, y_off], [0, 0, 1]])
+            else:
+                # --- MODO PERSPECTIVA QR (ORIGINAL) ---
+                pts_base = self.qr_last_seen_points
+                if pts_base is None: return frame
+                
+                e_prog = 1 - (1 - self.anim_mapa_progreso)**4 
                 src_p = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
                 
-                # Factor de expansión (tamaño actual determinado por e_prog)
-                esc_actual = escala_mapa * e_prog
+                tl, tr, bl = pts_base[0], pts_base[1], pts_base[3]
+                vx, vy = tr - tl, bl - tl
+                cx, cy = np.mean(pts_base[:, 0]), np.mean(pts_base[:, 1])
+                esc_actual = 5.0 * e_prog
                 
                 dst_p = np.float32([
-                    [cx + (-0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0],
-                     cy + (-0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
-                    [cx + (0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0],
-                     cy + (0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
-                    [cx + (-0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0],
-                     cy + (-0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]],
-                    [cx + (0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0],
-                     cy + (0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]]
+                    [cx + (-0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0], cy + (-0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
+                    [cx + (0.5 * esc_actual) * vx[0] + (-0.5 * esc_actual) * vy[0], cy + (0.5 * esc_actual) * vx[1] + (-0.5 * esc_actual) * vy[1]],
+                    [cx + (-0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0], cy + (-0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]],
+                    [cx + (0.5 * esc_actual) * vx[0] + (0.5 * esc_actual) * vy[0], cy + (0.5 * esc_actual) * vx[1] + (0.5 * esc_actual) * vy[1]]
                 ])
-
+                
                 self.mapa_matrix = cv2.getPerspectiveTransform(src_p, dst_p)
                 mapa_warp = cv2.warpPerspective(self.img_mapa_general, self.mapa_matrix, (w_f, h_f), borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
                 
-                # Añadimos un desvanecimiento suave durante el crecimiento para mayor fluidez
-                if e_prog < 1.0:
-                    mapa_warp[:, :, 3] = (mapa_warp[:, :, 3] * e_prog).astype(np.uint8)
+                if e_prog < 1.0: mapa_warp[:, :, 3] = (mapa_warp[:, :, 3] * e_prog).astype(np.uint8)
                 
-                # Simular textura de papel y sombra
-                if e_prog > 0.1:
-                    # Sombra proyectada debajo del mapa
-                    shadow_offset_x = int(10 * e_prog)
-                    shadow_offset_y = int(20 * e_prog)
-                    shadow_pts = dst_p + np.array([[shadow_offset_x, shadow_offset_y]] * 4, dtype=np.float32)
-                    cv2.fillConvexPoly(frame, shadow_pts.astype(int), (0, 0, 0), lineType=cv2.LINE_AA)
-                    frame = cv2.GaussianBlur(frame, (5, 5), 0) # Suavizar la sombra
-
-                    # Efecto de textura de papel (ruido sutil)
-                    noise = np.random.randint(0, 20, mapa_warp[:, :, :3].shape, dtype=np.uint8)
-                    mapa_warp[:,:,:3] = cv2.add(mapa_warp[:,:,:3], noise, dtype=cv2.CV_8U)
-
+                # Sombra y ruido (Estética de papel)
+                shadow_pts = dst_p + np.array([[10, 20]] * 4, dtype=np.float32)
+                dibujar_sombra(frame, np.mean(shadow_pts[:,0]), np.mean(shadow_pts[:,1]), int(w_f*0.2), int(h_f*0.05))
                 frame = render_alfa(frame, mapa_warp, 0, 0, 1.0)
+                current_scale = 1.0
 
-            # FASE: APARICIÓN SECUENCIAL DE ICONOS
-            if self.anim_mapa_progreso >= 0.6 and self.mapa_matrix is not None:
+            # --- PINES Y LÍNEAS ---
+            if self.anim_mapa_progreso > 0.6 and self.mapa_matrix is not None:
+                # Dibujar línea
+                p1_src = np.array([[[self.sitios_turisticos[0]['x_rel'] * w_m, self.sitios_turisticos[0]['y_rel'] * h_m]]], dtype=np.float32)
+                p2_src = np.array([[[self.sitios_turisticos[1]['x_rel'] * w_m, self.sitios_turisticos[1]['y_rel'] * h_m]]], dtype=np.float32)
+                p1_dst = cv2.perspectiveTransform(p1_src, self.mapa_matrix)[0][0]
+                p2_dst = cv2.perspectiveTransform(p2_src, self.mapa_matrix)[0][0]
+                
+                cv2.line(frame, tuple(p1_dst.astype(int)), tuple(p2_dst.astype(int)), (0, 255, 0) if ronda_completada else (150, 150, 150), 2, cv2.LINE_AA)
+
                 for i, sitio in enumerate(self.sitios_turisticos):
-                    # Delay secuencial para cada icono
-                    delay = i * 0.05
-                    if self.anim_mapa_progreso > (0.6 + delay):
+                    esta_bloqueado = (sitio['id'] == 'sitio_2' and not ronda_completada)
+                    if self.anim_mapa_progreso > (0.6 + i * 0.05):
                         self.icon_anims[i] = min(1.0, self.icon_anims[i] + 0.1)
-                    
-                    alpha_icon = self.icon_anims[i]
+
+                    alpha_icon = self.icon_anims[i] * (0.4 if esta_bloqueado else 1.0)
                     if alpha_icon <= 0: continue
 
                     pt_src = np.array([[[sitio['x_rel'] * w_m, sitio['y_rel'] * h_m]]], dtype=np.float32)
@@ -165,38 +183,17 @@ class MapSystem:
                     py_f = py + float_y - (20 * (1.0 - alpha_icon))
 
                     dist = np.sqrt((mouse_x - px)**2 + (mouse_y - py_f)**2)
-                    esc_pin = 0.15 if dist < 40 else 0.10
+                    esc_pin = (0.15 if dist < 40 else 0.10) * current_scale
                     
-                    img_a_usar = self.img_pin
-                    if sitio['id'] == 'sitio1' and self.img_pin_parque is not None:
-                        img_a_usar = self.img_pin_parque
-                    elif sitio['id'] == 'sitio2' and self.img_pin_iglesia is not None:
-                        img_a_usar = self.img_pin_iglesia
+                    img_a_usar = self.img_pin_parque if sitio['id'] == 'sitio1' else self.img_pin_iglesia
+                    if esta_bloqueado:
+                        img_a_usar = cv2.cvtColor(img_a_usar, cv2.COLOR_BGRA2GRAY)
+                        img_a_usar = cv2.cvtColor(img_a_usar, cv2.COLOR_GRAY2BGRA)
 
-                    if img_a_usar is not None:
-                        # DIBUJAR SOMBRA EN EL MAPA
-                        s_ratio = max(0.2, 1.0 - (abs(float_y) / 250))
-                        dibujar_sombra(frame, px, py, int(25 * esc_pin * 10 * s_ratio), int(8 * esc_pin * 10 * s_ratio))
-
-                        # Ajustar anclaje para iconos más pequeños
-                        frame = render_alfa(frame, img_a_usar, (px/w_f) - 0.025, (py_f/h_f) - 0.06, esc_pin)
-                        
-                        # Partículas de brillo cerca de los pines
-                        if dist < 40: # Solo si el mouse está cerca
-                            animation_manager.add_pin_glow_particles(px, py_f)
+                    dibujar_sombra(frame, px, py, int(25 * esc_pin * 10), int(8 * esc_pin * 10))
+                    frame = render_alfa(frame, img_a_usar, (px/w_f) - (0.2*esc_pin), (py_f/h_f) - (0.5*esc_pin), esc_pin)
                     
-                    # Etiqueta del sitio
-                    color_txt = (255, 255, 255) if dist < 40 else (200, 200, 200)
-                    
-                    if 'tx_rel' in sitio:
-                        pt_t_src = np.array([[[sitio['tx_rel'] * w_m, sitio['ty_rel'] * h_m]]], dtype=np.float32)
-                        pt_t_dst = cv2.perspectiveTransform(pt_t_src, self.mapa_matrix)
-                        tx, ty = pt_t_dst[0][0]
-                        pos_txt = (int(tx), int(ty + float_y))
-                    else:
-                        pos_txt = (int(px - 50), int(py_f + 10))
-                        
-                    # frame = dibujar_texto_utf8(frame, sitio['nombre'], pos_txt, 16, color_txt) # Desactivado para simplificar UI
+                    txt = "[BLOQUEADO]" if esta_bloqueado else sitio['nombre']
+                    frame = dibujar_texto_utf8(frame, txt, (int(px - 50 * current_scale), int(py_f + 15 * current_scale)), int(14 * current_scale), (255,255,255))
 
-            # cv2.putText(frame, "Selecciona un destino en el mapa", (int(w_f*0.25), 40), 0, 0.8, (255, 255, 255), 2) # Desactivado para simplificar UI
         return frame

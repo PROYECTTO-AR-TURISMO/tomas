@@ -14,8 +14,12 @@ class ARRenderer:
             print("Error: No se pudo abrir la cámara.")
             exit()
 
-    def render(self, frame, guia_activo, paso, max_pasos, activos, animales_stampida, mouse_x, mouse_y, last_avatar_bbox, monedas, tienda_abierta, outfits_disponibles, outfits_comprados, atuendo_actual, trivia_fase, trivia_opciones, trivia_opciones_fase2, trivia_errores, trivia_acierto):
+    def render(self, frame, estado, paso, max_pasos, activos, animales_stampida, mouse_x, mouse_y, last_avatar_bbox, monedas, tienda_abierta, outfits_disponibles, outfits_comprados, atuendo_actual, trivia_fase, trivia_opciones, trivia_opciones_fase2, trivia_errores, trivia_acierto, puzzle_system, ayuda_activa, ronda_completada, sitio_actual_id):
         h_f, w_f, _ = frame.shape
+        guia_activo = (estado == "guia")
+
+        if estado == "bienvenida":
+            return self.ui_manager.draw_welcome_screen(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager), None
 
         # --- EFECTO CINEMÁTICO DE ZOOM Y NOMBRE ---
         if self.animation_manager.cinematic_prog > 0:
@@ -32,103 +36,100 @@ class ARRenderer:
             # Posicionado debajo del HUD de monedas (aprox y=0.10) y más pequeño (tamaño 25)
             frame = dibujar_texto_utf8(frame, self.animation_manager.cinematic_name, (int(w_f*0.02), int(h_f*0.10)), 25, (255,255,255))
 
-        # Aplicar desenfoque global si hay una transición activa
-        if self.animation_manager.transition_active and self.animation_manager.blur_amount > 0:
-            # El tamaño del kernel (ksize) debe ser impar y mayor que cero para OpenCV
-            ksize = self.animation_manager.blur_amount
-            if ksize % 2 == 0: ksize += 1
-            frame = cv2.GaussianBlur(frame, (ksize, ksize), 0)
-
         if self.map_system.modo_seleccion:
-            frame = self.map_system.render_map_animation(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager.anim_frame, self.animation_manager)
-            # Texto "Selecciona un destino"
-            text_x = int(w_f * 0.5 - cv2.getTextSize("Selecciona un destino en el mapa", cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0][0] / 2)
-            apply_glassmorphism(frame, text_x - 20, 20, text_x + cv2.getTextSize("Selecciona un destino en el mapa", cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0][0] + 20, 60, blur_strength=15, alpha=0.3, border_radius=10)
-            frame = dibujar_texto_utf8(frame, "Selecciona un destino en el mapa", (text_x, 30), 20, (255, 255, 255))
+            frame = self.map_system.render_map_animation(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager.anim_frame, self.animation_manager, ronda_completada) # Pasa ronda_completada
+            # Texto instructivo superior con nuevo mensaje y color negro
+            txt_mapa = "¿cual es el siguiente sitio?" if ronda_completada else "selecciona el primer sitio turistico para desbloquear los otros"
+            txt_zoom = "Usa la rueda del mouse o dos dedos para hacer zoom" if ronda_completada else ""
+            
+            tw = max(cv2.getTextSize(txt_mapa, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0][0],
+                    cv2.getTextSize(txt_zoom, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0][0])
+            
+            box_w = tw + 45
+            bx1 = 10 # Movemos el recuadro al extremo izquierdo
+            box_h = 100 if ronda_completada else 80
+            apply_glassmorphism(frame, bx1, 35, bx1 + box_w, 35 + box_h, blur_strength=15, alpha=0.3, border_radius=10)
+            frame = dibujar_texto_utf8(frame, txt_mapa, (bx1 + 15, 42), 20, (0, 0, 0))
+            if txt_zoom:
+                frame = dibujar_texto_utf8(frame, txt_zoom, (bx1 + 15, 75), 14, (50, 50, 50))
             last_avatar_bbox = None # No hay avatar visible en modo selección
         elif not guia_activo:
+            # Avatar de bienvenida durante el escaneo (Lado Izquierdo)
+            if self.ui_manager.avatar_6 is not None: # Usamos el nuevo avatar_6
+                frame = render_alfa(frame, self.ui_manager.avatar_6, 0.05, 0.25, 0.30)
+
             if self.ui_manager.img_escaner is not None:
-                img_full = cv2.resize(self.ui_manager.img_escaner, (w_f, h_f), interpolation=cv2.INTER_AREA)
-                frame = render_alfa(frame, img_full, 0.0, 0.0, 1.0)
+                # Renderizar la interfaz del escáner un poco más grande
+                frame = render_alfa(frame, self.ui_manager.img_escaner, 0.45, 0.15, 0.70)
             
-            text_x = int(w_f * 0.5 - cv2.getTextSize("ESCANEE QR", cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0][0] / 2)
-            apply_glassmorphism(frame, text_x - 20, int(h_f * 0.95), text_x + cv2.getTextSize("ESCANEE QR", cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0][0] + 20, int(h_f * 0.99), blur_strength=15, alpha=0.3, border_radius=10)
-            cv2.putText(frame, "ESCANEE QR", (text_x, int(h_f * 0.98)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-            last_avatar_bbox = None # No hay avatar visible cuando no está activo el guía
         else:
             last_avatar_bbox = None # Resetear en cada frame para evitar clics fantasma
             
             # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
-            if paso == 4 and activos.get('mapa_img') is not None:
+            # En sitio_2 (max_pasos=4), el mapa aparece en el paso 3. En otros, en el paso 4.
+            if (paso == 4 and sitio_actual_id == 'sitio1') or (sitio_actual_id == 'sitio_2' and paso == 3):
                 duracion_caida = 40
-                duracion_materializacion = 30
-                
                 fall_prog = min(self.animation_manager.anim_frame / duracion_caida, 1.0)
-                mat_prog = min(self.animation_manager.anim_frame / duracion_materializacion, 1.0)
-                
-                mapa_original = activos['mapa_img']
-                h_m, w_m = mapa_original.shape[:2]
-                
-                mapa_animado = mapa_original.copy()
-                if activos['mapa_img'] is not None and mapa_animado.shape[2] == 4:
-                    # Usar máscara pre-generada para evitar parpadeo constante
-                    map_noise_mask = activos.get('mapa_mask')
-                    if map_noise_mask is not None:
-                        mask = (map_noise_mask < mat_prog).astype(np.uint8) * 255
-                        mapa_animado[:, :, 3] = cv2.bitwise_and(mapa_animado[:, :, 3], mask)
-                
-                escala_base = 0.8
-                w_target = w_f * escala_base
-                h_target = h_m * (w_target / w_m)
-                
-                center_x = w_f / 2
-                bottom_y = h_f * 0.9
-                
-                pts_inicio = np.float32([
-                    [center_x - w_target/2, bottom_y - h_target], [center_x + w_target/2, bottom_y - h_target],
-                    [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]
-                ])
-                
-                persp_suelo = 0.85
-                pts_fin = np.float32([
-                    [center_x - (w_target/2) * persp_suelo, bottom_y - (h_target * 0.3)],
-                    [center_x + (w_target/2) * persp_suelo, bottom_y - (h_target * 0.3)],
-                    [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]
-                ])
-                
-                pts_dst = pts_inicio + (pts_fin - pts_inicio) * fall_prog
-                
-                if fall_prog >= 1.0:
-                    cnt_mapa = pts_dst.reshape((-1, 1, 2)).astype(np.int32)
-                    is_over_map = cv2.pointPolygonTest(cnt_mapa, (mouse_x, mouse_y), False) >= 0
-                    
-                    self.animation_manager.hover_mapa_anim = min(1.0, self.animation_manager.hover_mapa_anim + 0.1) if is_over_map else max(0.0, self.animation_manager.hover_mapa_anim - 0.1)
-                    
-                    if self.animation_manager.hover_mapa_anim > 0:
-                        for i in range(4):
-                            px, py = pts_dst[i]
-                            dist = np.sqrt((px - mouse_x)**2 + (py - mouse_y)**2)
-                            influencia = max(0, 1.0 - dist / 350.0)
-                            hundimiento = (influencia * 35 + np.sin(self.animation_manager.anim_frame * 0.2) * 4 * influencia) * self.animation_manager.hover_mapa_anim
-                            pts_dst[i][1] += hundimiento
 
-                pts_src = np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]])
-                
-                try:
-                    matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
-                    mapa_warped = cv2.warpPerspective(mapa_animado, matrix, (w_f, h_f), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
-                    frame = render_alfa(frame, mapa_warped, 0, 0, 1.0)
-                except:
-                    frame = render_alfa(frame, mapa_animado, 0.1, 0.6, 0.8)
+                # Renderizado del Mapa (Solo si existe el activo)
+                if activos.get('mapa_img') is not None:
+                    duracion_materializacion = 30
+                    mat_prog = min(self.animation_manager.anim_frame / duracion_materializacion, 1.0)
+                    mapa_original = activos['mapa_img']
+                    h_m, w_m = mapa_original.shape[:2]
+                    mapa_animado = mapa_original.copy()
+                    
+                    if mapa_animado.shape[2] == 4:
+                        map_noise_mask = activos.get('mapa_mask')
+                        if map_noise_mask is not None:
+                            mask = (map_noise_mask < mat_prog).astype(np.uint8) * 255
+                            mapa_animado[:, :, 3] = cv2.bitwise_and(mapa_animado[:, :, 3], mask)
+                    
+                    escala_base, w_target = 0.8, w_f * 0.8
+                    h_target = h_m * (w_target / w_m)
+                    center_x, bottom_y = w_f / 2, h_f * 0.9
+                    
+                    pts_inicio = np.float32([[center_x - w_target/2, bottom_y - h_target], [center_x + w_target/2, bottom_y - h_target], [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]])
+                    pts_fin = np.float32([[center_x - (w_target/2) * 0.85, bottom_y - (h_target * 0.3)], [center_x + (w_target/2) * 0.85, bottom_y - (h_target * 0.3)], [center_x - w_target/2, bottom_y], [center_x + w_target/2, bottom_y]])
+                    pts_dst = pts_inicio + (pts_fin - pts_inicio) * fall_prog
+                    
+                    if fall_prog >= 1.0:
+                        cnt_mapa = pts_dst.reshape((-1, 1, 2)).astype(np.int32)
+                        is_over_map = cv2.pointPolygonTest(cnt_mapa, (mouse_x, mouse_y), False) >= 0
+                        self.animation_manager.hover_mapa_anim = min(1.0, self.animation_manager.hover_mapa_anim + 0.1) if is_over_map else max(0.0, self.animation_manager.hover_mapa_anim - 0.1)
+                        if self.animation_manager.hover_mapa_anim > 0:
+                            for i in range(4):
+                                px, py = pts_dst[i]
+                                dist = np.sqrt((px - mouse_x)**2 + (py - mouse_y)**2)
+                                influencia = max(0, 1.0 - dist / 350.0)
+                                pts_dst[i][1] += (influencia * 35 + np.sin(self.animation_manager.anim_frame * 0.2) * 4 * influencia) * self.animation_manager.hover_mapa_anim
 
-                if fall_prog >= 1.0 and activos.get('pop_up_img') is not None:
+                    try:
+                        matrix = cv2.getPerspectiveTransform(np.float32([[0, 0], [w_m, 0], [0, h_m], [w_m, h_m]]), pts_dst)
+                        mapa_warped = cv2.warpPerspective(mapa_animado, matrix, (w_f, h_f), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0,0))
+                        frame = render_alfa(frame, mapa_warped, 0, 0, 1.0)
+                    except:
+                        pass
+
+                # Seleccionar la imagen que emerge del mapa (Prioridad a foto_h en sitio 2 paso 3)
+                img_pop = activos.get('foto_h') if (sitio_actual_id == 'sitio_2' and paso == 3) else activos.get('pop_up_img')
+
+                if fall_prog >= 1.0 and img_pop is not None:
                     pop_prog = min((self.animation_manager.anim_frame - duracion_caida) / 30.0, 1.0)
                     flotacion = np.sin(self.animation_manager.anim_frame * 0.1) * 0.02
-                    esc_pop = 0.4 * pop_prog
-                    y_pop = 0.6 - (0.3 * pop_prog) + flotacion + (0.05 * self.animation_manager.hover_mapa_anim)
-                    x_pop = 0.45 - (0.35 * pop_prog)
-                    frame = render_alfa(frame, activos['pop_up_img'], x_pop, y_pop, esc_pop)
-                
+                    
+                    if sitio_actual_id == 'sitio_2' and paso == 3:
+                        # Trayectoria: Emerge del centro y termina en la esquina (0.10, 0.10) igual que sitio 1
+                        esc_pop = 0.3 * pop_prog
+                        x_pop = 0.40 - (0.30 * pop_prog)
+                        y_pop = 0.50 - (0.40 * pop_prog) + flotacion
+                    else:
+                        # Comportamiento estándar para pop-ups del mapa
+                        esc_pop = 0.4 * pop_prog
+                        y_pop = 0.6 - (0.3 * pop_prog) + flotacion + (0.05 * self.animation_manager.hover_mapa_anim)
+                        x_pop = 0.45 - (0.35 * pop_prog)
+                    
+                    frame = render_alfa(frame, img_pop, x_pop, y_pop, esc_pop)
             # ------ FIN LÓGICA PASO 4 ------
 
             # --- RENDERIZADO DEL SUELÓN (PASO 2) ---
@@ -156,8 +157,14 @@ class ARRenderer:
                 frame = render_alfa(frame, activos['porton'], 0.10, 0.02, 1.1)
 
             # ------ RENDERIZADO DE AVATAR CON SOMBRA ------
+            # En el paso 5 no renderizamos el avatar estándar ni su burbuja, 
+            # ya que usamos el avatar especial de 'duda' dentro de la interfaz de trivia.
             av_handler = activos['avatars'].get(paso)
-            if av_handler:
+            
+            # Condición especial: en el sitio 2 (paso 4), ocultamos el avatar hasta resolver el puzzle
+            puede_mostrar_av = not (sitio_actual_id == 'sitio_2' and paso == 4 and not puzzle_system.completado)
+            
+            if av_handler and puede_mostrar_av and not (sitio_actual_id == 'sitio1' and paso == 5):
                 if paso == 2 and av_handler.current_frame >= len(av_handler.frames) - 1:
                     img_av = None
                 else:
@@ -184,7 +191,7 @@ class ARRenderer:
                     
                     av_handler.spawn_timer += 1
                     bounce_offset = 0
-                    
+                    """ # Comentamos o eliminamos el efecto de rebote
                     if av_handler.spawn_timer < 20:
                         t = av_handler.spawn_timer / 20.0
                         # El avatar sube y baja siguiendo una curva de seno amortiguada para un aterrizaje suave
@@ -193,9 +200,7 @@ class ARRenderer:
                         # El impacto ocurre justo cuando termina el movimiento de caída (frame 20)
                         if av_handler.spawn_timer >= 19 and not av_handler.dust_done:
                             av_handler.dust_done = True
-                            foot_x = int(w_f * x_porc) + (w_esc // 2)
-                            foot_y = int(h_f * y_porc) + h_esc - 10
-                            self.animation_manager.add_dust_particles(foot_x, foot_y)
+                    """
 
                     y_porc_final = y_porc - bounce_offset
                     x_px, y_px = int(w_f * x_porc), int(h_f * y_porc_final)
@@ -208,29 +213,69 @@ class ARRenderer:
                     frame = render_alfa(frame, img_av, x_porc, y_porc_final, esc)
                     
                     bu = activos['burbujas'].get(paso)
-                    if bu and paso != 5 and img_av is not None:
-                        # --- ANIMACIÓN DE ESCALA POP-IN PARA LA BURBUJA ---
-                        # Calculamos la escala basada en el frame actual del GIF para el efecto de aparición
+                    if bu and img_av is not None and not (sitio_actual_id == 'sitio1' and paso == 5):
                         target_bubble_scale = 0.9
-                        # El pop-in se completa en los primeros 10 frames (muy rápido)
-                        pop_prog = min(1.0, bu.current_frame / 10.0)
-                        # Aplicamos un suavizado Out Cubic para que el crecimiento sea elegante
-                        e_scale = 1 - (1 - pop_prog)**3
-                        # La burbuja sigue el rebote del avatar para mantener la conexión
-                        frame = render_alfa(frame, bu.get_frame(), x_porc, y_porc_final - 0.40, target_bubble_scale * e_scale)
+                        # Eliminamos e_scale para que la burbuja no crezca, sino que aparezca a tamaño real
+                        e_scale = 1.0 
+                        # Ajuste específico para el final de los sitios (paso 6 o paso 4 en sitio 2)
+                        es_final = (paso == max_pasos)
+                        x_bu = x_porc + 0.12 if es_final else x_porc
+                        y_bu = y_porc_final - 0.46 if es_final else y_porc_final - 0.42
+                        frame = render_alfa(frame, bu.get_frame(), x_bu, y_bu, target_bubble_scale)
 
             # --- RENDERIZADO DE INTERFAZ DE TRIVIA (PASO 5) ---
-            if paso == 5:
+            if paso == 5 and sitio_actual_id == 'sitio1':
                 if trivia_fase == 1:
-                    frame = self.ui_manager.draw_trivia_phase1(frame, w_f, h_f, trivia_opciones, trivia_errores, trivia_acierto, mouse_x, mouse_y)
+                    frame = self.ui_manager.draw_trivia_phase1(frame, w_f, h_f, trivia_opciones, trivia_errores, trivia_acierto, mouse_x, mouse_y, activos.get('avatar_trivia'))
                 else:
-                    frame = self.ui_manager.draw_trivia_phase2(frame, w_f, h_f, trivia_opciones_fase2, trivia_errores, trivia_acierto, mouse_x, mouse_y, self.animation_manager)
+                    frame = self.ui_manager.draw_trivia_phase2(frame, w_f, h_f, trivia_opciones_fase2, trivia_errores, trivia_acierto, mouse_x, mouse_y, self.animation_manager, activos.get('avatar_trivia'))
 
-            if paso == max_pasos and activos['foto_h'] is not None:
+            # --- RENDERIZADO DEL ROMPECABEZAS REALISTA ---
+            if sitio_actual_id == 'sitio_2' and paso == 4 and puzzle_system.activo:
+                # Actualizar el centro del área de armado según el tamaño de la ventana
+                puzzle_system.centro_target = (w_f // 2, h_f // 2)
+                
+                # Dibujar guía visual del puzzle (rectángulo semitransparente)
+                px1 = puzzle_system.centro_target[0] - (puzzle_system.w_puzzle // 2)
+                py1 = puzzle_system.centro_target[1] - (puzzle_system.h_puzzle // 2)
+                px2 = px1 + puzzle_system.w_puzzle
+                py2 = py1 + puzzle_system.h_puzzle
+                
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (px1, py1), (px2, py2), (255, 255, 255), 2)
+                cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+                
+                # Dibujar la imagen guía "fantasma" de fondo para ayudar al usuario
+                if puzzle_system.img_guia is not None:
+                    frame = render_alfa(frame, puzzle_system.img_guia, px1/w_f, py1/h_f, 1.0)
+                
+                for p in puzzle_system.piezas:
+                    # Renderizar cada pieza con su forma y contorno
+                    frame = render_alfa(frame, p.img, p.x/w_f, p.y/h_f, 1.0)
+
+                if puzzle_system.completado:
+                    # Mensaje de éxito si el usuario termina
+                    msg = "¡ROMPECABEZAS COMPLETADO!"
+                    tw, th = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
+                    apply_glassmorphism(frame, w_f//2 - tw//2 - 20, h_f//2 - th//2 - 20, w_f//2 + tw//2 + 20, h_f//2 + th//2 + 20)
+                    frame = dibujar_texto_utf8(frame, msg, (w_f//2 - tw//2, h_f//2 - th//2), 30, (0, 255, 0))
+
+            # Se muestra la foto histórica al final (paso 6) en el sitio 1, pero se quita en el sitio 2 paso 5 por petición
+            if paso == max_pasos and activos['foto_h'] is not None and sitio_actual_id != 'sitio_2':
                 frame = render_alfa(frame, activos['foto_h'], 0.10, 0.10, 0.3)
 
-            # --- RENDERIZADO DE BOTONES DE NAVEGACIÓN ---
-            frame = self.ui_manager.draw_navigation_buttons(frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, self.animation_manager)
+            # --- BOTÓN DE FINALIZACIÓN (SITIO 1, PASO 6) ---
+            if paso == 6 and activos.get('avatars').get(6) is not None and sitio_actual_id == 'sitio1':
+                frame = self.ui_manager.draw_finish_site_button(frame, w_f, h_f, mouse_x, mouse_y)
+            else:
+                # --- RENDERIZADO DE BOTONES DE NAVEGACIÓN ---
+                show_next = True
+                # Ocultar "Siguiente" en Trivia de Sitio 1, Puzzle incompleto de Sitio 2, o en cualquier paso de Felicitaciones
+                if sitio_actual_id == 'sitio1' and paso == 5: show_next = False
+                if sitio_actual_id == 'sitio_2' and paso == 4 and not puzzle_system.completado: show_next = False
+                if paso == max_pasos: show_next = False
+                
+                frame = self.ui_manager.draw_navigation_buttons(frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, self.animation_manager, show_next)
 
             # --- INTERFAZ GLOBAL (MONEDAS Y TIENDA) ---
             frame = self.ui_manager.draw_hud(frame, w_f, h_f, paso, max_pasos, monedas, mouse_x, mouse_y, self.animation_manager)
@@ -240,12 +285,6 @@ class ARRenderer:
 
         # Renderizar partículas
         self.animation_manager.render_particles(frame)
-
-        # Aplicar fade global si hay una transición activa
-        if self.animation_manager.transition_active and self.animation_manager.fade_alpha > 0:
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w_f, h_f), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, self.animation_manager.fade_alpha, frame, 1.0 - self.animation_manager.fade_alpha, 0, frame)
 
         return frame, last_avatar_bbox
 

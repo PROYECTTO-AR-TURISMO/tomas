@@ -15,6 +15,7 @@ from trivia_system import TriviaSystem
 from shop_system import ShopSystem
 from ui_manager import UIManager
 from ar_renderer import ARRenderer
+from puzzle_system import PuzzleSystem
 
 # Configuraciones de OCR para Windows
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -33,13 +34,17 @@ class App: # Renombrado de VisorTurismoAR a App
         self.trivia_system = TriviaSystem()
         self.shop_system = ShopSystem(self.base_dir)
         self.ui_manager = UIManager(self.base_dir)
+        self.puzzle_system = PuzzleSystem()
         self.ar_renderer = ARRenderer(self.base_dir, self.map_system, self.ui_manager, self.animation_manager)
 
         # Variables de estado de la aplicación
-        self.guia_activo = False
+        self.estado = "bienvenida" # bienvenida, escaneo, mapa, guia
+        self.guia_activo = False   # Mantenemos por compatibilidad con renderer
+        self.ayuda_activa = False
         self.paso = 1
         self.max_pasos = 6
         self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None}
+        self.ronda_completada = False # Estado de progresión global
         self.animales_stampida = [] # Lista para manejar la estampida del paso 2
         
         # Inicializar variables de mouse
@@ -63,26 +68,57 @@ class App: # Renombrado de VisorTurismoAR a App
             return False
         
         self.sitio_actual_id = sitio_id
-        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'vaca_gif': None, 'iguana_gif': None, 'suelo_textura': None, 'porton': None}
+        self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'vaca_gif': None, 'iguana_gif': None, 'suelo_textura': None, 'porton': None, 'avatar_trivia': None}
         archivos = os.listdir(path_sitio)
         
+        # Ajustar cantidad de pasos y mapeo de archivos según el sitio
+        if sitio_id == 'sitio_2':
+            self.max_pasos = 5 # Ahora son 5 pasos (Intro, Estampida, Mapa, Puzzle, Felicitaciones)
+        else:
+            self.max_pasos = 6
+
+        # Limpiar puzzle previo
+        self.puzzle_system.activo = False
+        self.puzzle_system.piezas = []
+
         for i in range(1, self.max_pasos + 1):
+            # Para sitio_2, el paso 1 usa el archivo 5 y el paso 2 el 6
+            file_num = i + 4 if sitio_id == 'sitio_2' else i
+            
+            # Identificar nombres de archivos (Especial para felicitaciones al final de cada sitio)
+            es_ultimo_paso = (sitio_id == 'sitio1' and i == 6) or (sitio_id == 'sitio_2' and i == 5)
+            nombre_av = "avatar_felicitaciones.gif" if es_ultimo_paso else f"avatar_{file_num}.gif"
+            nombre_bu = "burbuja_felicitaciones.gif" if es_ultimo_paso else f"burbuja_{file_num}.gif"
+
             # Buscar avatar con prioridad al atuendo actual
-            path_avatar = os.path.join(path_sitio, f"avatar_{i}.gif")
+            path_avatar = os.path.join(path_sitio, nombre_av)
             if self.shop_system.atuendo_actual != "original":
-                path_custom = os.path.join(self.base_dir, 'assets', 'outfits', self.shop_system.atuendo_actual, f"avatar_{i}.gif")
+                path_custom = os.path.join(self.base_dir, 'assets', 'outfits', self.shop_system.atuendo_actual, nombre_av)
                 if os.path.exists(path_custom):
                     path_avatar = path_custom
             
             if os.path.exists(path_avatar):
-                self.activos['avatars'][i] = GifHandler(path_avatar)
+                handler = GifHandler(path_avatar)
+                if sitio_id == 'sitio_2' and file_num == 6:
+                    handler.paused = True
+                self.activos['avatars'][i] = handler
 
             for f in archivos:
-                if f.lower() == f"burbuja_{i}.gif":
+                if f.lower() == nombre_bu.lower():
                     self.activos['burbujas'][i] = GifHandler(os.path.join(path_sitio, f))
         
-        if 'historica.png' in [f.lower() for f in archivos]:
-            self.activos['foto_h'] = cv2.imread(os.path.join(path_sitio, 'historica.png'), cv2.IMREAD_UNCHANGED)
+        # Búsqueda flexible de la foto histórica (soporta .png, .jpg, .jpeg y mayúsculas)
+        foto_h_file = next((f for f in archivos if f.lower().startswith('historica.')), None)
+        if foto_h_file:
+            path_h = os.path.join(path_sitio, foto_h_file)
+            self.activos['foto_h'] = cv2.imread(path_h, cv2.IMREAD_UNCHANGED)
+            
+            # Si es el sitio 2, preparamos el puzzle para el paso final
+            if sitio_id == 'sitio_2' and self.activos['foto_h'] is not None:
+                self.puzzle_system.inicializar_puzzle(self.activos['foto_h'])
+
+        # Cargar avatar especial de duda (para la trivia en paso 5)
+        self.activos['avatar_trivia'] = load_ui_asset('duda.png', self.base_dir, sitio_id)
 
         # Cargar GIFs de animales para la estampida (Paso 2)
         vaca_path = load_ui_asset('vaca.gif', self.base_dir, sitio_id)
@@ -124,24 +160,28 @@ class App: # Renombrado de VisorTurismoAR a App
             img = cv2.imread(os.path.join(path_sitio, mapa_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             self.activos['mapa_img'] = img
+        elif sitio_id == 'sitio_2':
+            # Si no hay mapa específico en la carpeta del sitio 2, usamos el mapa general como pidió el usuario
+            self.activos['mapa_img'] = self.map_system.img_mapa_general
+
+        # Generar máscara compleja de materialización (H, V, Diag, Ruido) si hay un mapa cargado (específico o general)
+        if self.activos['mapa_img'] is not None:
+            h, w = self.activos['mapa_img'].shape[:2]
+            noise = np.random.rand(h, w).astype(np.float32)
+            h_mask = np.repeat(np.random.rand(h // 6 + 1), 6)[:h, np.newaxis]
+            v_mask = np.repeat(np.random.rand(w // 6 + 1), 6)[np.newaxis, :w]
+            yy, xx = np.indices((h, w))
+            diag = (xx + yy) / (w + h)
+            combined = (noise * 0.4 + h_mask * 0.2 + v_mask * 0.2 + diag * 0.2)
             
-            # Generar máscara compleja de materialización (H, V, Diag, Ruido) aquí, si el mapa se cargó
-            if self.activos['mapa_img'] is not None:
-                h, w = self.activos['mapa_img'].shape[:2]
-                noise = np.random.rand(h, w).astype(np.float32)
-                h_mask = np.repeat(np.random.rand(h // 6 + 1), 6)[:h, np.newaxis]
-                v_mask = np.repeat(np.random.rand(w // 6 + 1), 6)[np.newaxis, :w]
-                yy, xx = np.indices((h, w))
-                diag = (xx + yy) / (w + h)
-                combined = (noise * 0.4 + h_mask * 0.2 + v_mask * 0.2 + diag * 0.2)
-                
-                diff = combined.max() - combined.min()
-                if diff > 0:
-                    self.activos['mapa_mask'] = (combined - combined.min()) / diff
-                else:
-                    self.activos['mapa_mask'] = combined
+            diff = combined.max() - combined.min()
+            if diff > 0:
+                self.activos['mapa_mask'] = (combined - combined.min()) / diff
             else:
-                self.activos['mapa_mask'] = None
+                self.activos['mapa_mask'] = combined
+        else:
+            self.activos['mapa_mask'] = None
+
         if pop_up_file:
             img = cv2.imread(os.path.join(path_sitio, pop_up_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
@@ -161,13 +201,17 @@ class App: # Renombrado de VisorTurismoAR a App
         return True
 
     def reproducir_texto_paso(self, mensaje_extra=""):
-        if self.paso == 5:
+        if self.paso == 5 and self.sitio_actual_id == 'sitio1':
             if self.trivia_system.trivia_fase == 1:
                 print("  [GAME] Iniciando desafío del Paso 5 (Parte 1)...")
                 self.audio_manager.tts.decir(mensaje_extra + "podrias recordarme en que año se tomó la foto para avanzar")
             else:
                 print("  [GAME] Iniciando desafío del Paso 5 (Parte 2)...")
                 self.audio_manager.tts.decir(mensaje_extra + "¿quien tomo la foto?")
+            return
+        # Si es el paso del rompecabezas del Sitio 2
+        if self.sitio_actual_id == 'sitio_2' and self.paso == 4:
+            self.audio_manager.tts.decir(mensaje_extra + "ayudame a armar la catedral")
             return
 
         # Intentamos obtener el texto para el paso actual
@@ -197,10 +241,10 @@ class App: # Renombrado de VisorTurismoAR a App
         self.audio_manager.tts.decir(mensaje_extra + texto)
 
     def _cambiar_paso(self, nuevo_paso, mensaje_extra=""):
-        """Inicia el proceso de transición hacia un nuevo paso."""
+        """Aplica el cambio de paso de forma inmediata."""
         self.proximo_paso = nuevo_paso
         self.proximo_mensaje = mensaje_extra
-        self.animation_manager.start_transition()
+        self._ejecutar_cambio_real()
 
     def _ejecutar_cambio_real(self):
         """Aplica el cambio de estado cuando la pantalla está totalmente oscurecida."""
@@ -228,6 +272,33 @@ class App: # Renombrado de VisorTurismoAR a App
         # Actualizar posición del mouse siempre
         self.mouse_x, self.mouse_y = x, y
 
+        if self.estado == "bienvenida":
+            if event == cv2.EVENT_LBUTTONDOWN:
+                # Botón "Comenzar" abajo a la derecha
+                if (w_f*0.7 < x < w_f*0.98) and (h_f*0.8 < y < h_f*0.95):
+                    self.animation_manager.start_transition()
+                    self.estado = "escaneo"
+            return
+
+        # Botón de Ayuda (HUD)
+        if event == cv2.EVENT_LBUTTONDOWN and self.ui_manager.is_hovering_help_button(x, y, w_f, h_f):
+            self.ayuda_activa = not self.ayuda_activa
+            return
+            
+        if self.ayuda_activa and event == cv2.EVENT_LBUTTONDOWN:
+            self.ayuda_activa = False # Cerrar ayuda con cualquier clic
+            return
+
+        if event in [cv2.EVENT_LBUTTONDOWN, cv2.EVENT_MOUSEMOVE, cv2.EVENT_LBUTTONUP] and self.guia_activo:
+            # Interacción exclusiva para el paso del rompecabezas (Sitio 2, Paso 4)
+            if self.sitio_actual_id == 'sitio_2' and self.paso == 4 and self.puzzle_system.activo:
+                # Detectar si ya hay una pieza en movimiento antes de procesar
+                was_dragging = self.puzzle_system.selected_piece is not None
+                self.puzzle_system.manejar_mouse(event, x, y)
+                # Si se está arrastrando o se acaba de seleccionar, bloqueamos otros clics
+                if was_dragging or self.puzzle_system.selected_piece is not None:
+                    return
+
         # NUEVO: Lógica de scroll con la rueda del mouse para la tienda
         if event == cv2.EVENT_MOUSEWHEEL:
             if self.shop_system.tienda_abierta:
@@ -238,6 +309,10 @@ class App: # Renombrado de VisorTurismoAR a App
                 content_h = 100 + len(self.shop_system.outfits_disponibles) * 110
                 min_scroll = min(0, h_f - content_h - 50)
                 self.animation_manager.shop_scroll_y = max(min_scroll, min(0, self.animation_manager.shop_scroll_y))
+            elif self.map_system.modo_seleccion and self.ronda_completada:
+                # Permitir zoom en el mapa si la ronda 1 terminó
+                delta = 0.1 if flags > 0 else -0.1
+                self.map_system.target_zoom = max(0.5, min(2.5, self.map_system.target_zoom + delta))
         
         if event == cv2.EVENT_LBUTTONDOWN:
             # Botón Salir App (Esquina superior derecha del HUD)
@@ -256,6 +331,12 @@ class App: # Renombrado de VisorTurismoAR a App
 
                 # Área de detección aumentada para que responda al primer intento
                 if np.sqrt((x - px)**2 + (y - py)**2) < 70 and not self.animation_manager.cinematic_active:
+                    # Bloqueo lógico: Si es la catedral y no se ha completado la ronda
+                    if sitio['id'] == 'sitio_2' and not self.ronda_completada:
+                        self.audio_manager.tts.decir("Primero completa la actividad en la Ronda del Sinú")
+                        self.animation_manager.add_button_pulse(x, y)
+                        return
+
                     self.animation_manager.add_button_pulse(x, y)
                     self.animation_manager.start_cinematic(sitio['nombre'])
                     # Iniciar ambiente después de un breve delay cinematográfico
@@ -263,11 +344,22 @@ class App: # Renombrado de VisorTurismoAR a App
                     if self.cargar_activos_sitio(sitio['id']):
                         self.audio_manager.iniciar_ambiente(sitio['id'])
                         self.map_system.modo_seleccion = False
+                        self.estado = "guia"
                         self.guia_activo = True
                         self._cambiar_paso(1)
                     return
 
         if event == cv2.EVENT_LBUTTONDOWN and self.guia_activo:
+            # --- DETECCIÓN DE BOTÓN "VAMOS AL SIGUIENTE SITIO" (Paso 6, Sitio 1) ---
+            if self.paso == 6 and self.sitio_actual_id == 'sitio1':
+                if self.ui_manager.is_hovering_finish_button(x, y, w_f, h_f):
+                    self.ronda_completada = True
+                    self.guia_activo = False
+                    self.estado = "mapa"
+                    self.map_system.modo_seleccion = True
+                    self.map_system.anim_mapa_progreso = 1.0 # Empezar con mapa abierto
+                    return
+
             # --- LÓGICA DE NAVEGACIÓN (PRIORIDAD MÁXIMA PARA EVITAR BLOQUEOS) ---
             if y > h_f * 0.75:
                 # Botón Atrás
@@ -280,8 +372,17 @@ class App: # Renombrado de VisorTurismoAR a App
                             self._cambiar_paso(self.paso - 1)
                     return
                 # Botón Siguiente (Derecha)
-                elif x > w_f * 0.7 and self.paso != 5:
+                elif x > w_f * 0.7:
+                    # Bloqueos: Trivia (S1-P5), Puzzle incompleto (S2-P4) o Paso Final
+                    if (self.sitio_actual_id == 'sitio1' and self.paso == 5) or \
+                       (self.sitio_actual_id == 'sitio_2' and self.paso == 4 and not self.puzzle_system.completado) or \
+                       (self.paso == self.max_pasos):
+                        return
+
                     if self.paso == self.max_pasos:
+                        # Si completamos el último paso de la Ronda, desbloqueamos la Catedral
+                        if self.sitio_actual_id == 'sitio1':
+                            self.ronda_completada = True
                         self.guia_activo = False
                         self.map_system.modo_seleccion = True
                         self.map_system.anim_mapa_progreso = 0.0
@@ -289,7 +390,11 @@ class App: # Renombrado de VisorTurismoAR a App
                         self._cambiar_paso(self.paso + 1)
                     return
                 # Botón Saltar
-                elif 0.18 * w_f <= x < 0.38 * w_f and self.paso != 5:
+                elif 0.18 * w_f <= x < 0.38 * w_f:
+                    if (self.sitio_actual_id == 'sitio1' and self.paso == 5) or \
+                       (self.sitio_actual_id == 'sitio_2' and self.paso == 4 and not self.puzzle_system.completado) or \
+                       (self.paso == self.max_pasos):
+                        return
                     self._cambiar_paso(self.max_pasos)
                     return
 
@@ -349,7 +454,7 @@ class App: # Renombrado de VisorTurismoAR a App
                 return
 
             # --- Lógica de Juego (Paso 5) ---
-            if self.paso == 5 and self.trivia_system.trivia_fase == 1:
+            if self.sitio_actual_id == 'sitio1' and self.paso == 5 and self.trivia_system.trivia_fase == 1:
                 # Calcular dinámicamente las dimensiones de la imagen de fondo para alinear los clics
                 if self.ui_manager.bg_opciones_1 is not None:
                     target_h_bg = h_f * 0.65 # Más pequeño para que la cámara sea el fondo real
@@ -380,12 +485,12 @@ class App: # Renombrado de VisorTurismoAR a App
                             self.audio_manager.tts.decir("Ese no es el año correcto. ¡Sigue intentando!")
                         return
 
-            elif self.paso == 5 and self.trivia_system.trivia_fase == 2:
+            elif self.sitio_actual_id == 'sitio1' and self.paso == 5 and self.trivia_system.trivia_fase == 2:
                 # (Ajustado para el nuevo UI Manager)
                 if self.ui_manager.bg_opciones_2 is not None:
                     target_h_bg = h_f * 0.70 # Mantiene el ancho
-                    base_scale_bg = target_h_bg / self.bg_opciones_2.shape[0]
-                    w_bg_px = self.bg_opciones_2.shape[1] * base_scale_bg
+                    base_scale_bg = target_h_bg / self.ui_manager.bg_opciones_2.shape[0]
+                    w_bg_px = self.ui_manager.bg_opciones_2.shape[1] * base_scale_bg
                     # Centrado horizontalmente
                     x_porc_bg = (w_f - w_bg_px) / 2 / w_f
                     x_img, y_img = w_f * x_porc_bg, h_f * 0.35 # Empujado hacia abajo para dar espacio a la pregunta
@@ -448,18 +553,21 @@ class App: # Renombrado de VisorTurismoAR a App
 
             # Actualizar estado de los gestores
             self.animation_manager.update(self.mouse_x, self.mouse_y, show_leaves=self.guia_activo)
-            
-            # NUEVO: Sincronización del cambio de paso con el punto máximo del fundido (clímax de la transición)
-            if (self.animation_manager.transition_active and 
-                self.animation_manager.transition_timer == self.animation_manager.transition_duration // 2):
-                self._ejecutar_cambio_real()
 
-            self.map_system.update_qr_detection(frame, self.guia_activo)
+            # Actualizar detección si estamos buscando el QR o si el mapa está abierto para que se mueva con el código
+            if self.estado in ["escaneo", "mapa"]:
+                self.map_system.update_qr_detection(frame, self.guia_activo)
+                if self.map_system.modo_seleccion and self.estado == "escaneo":
+                    self.estado = "mapa"
+                
+                # Si el mapa se cerró por perder el QR, volvemos al estado de escaneo
+                if self.estado == "mapa" and self.map_system.anim_mapa_progreso <= 0 and not self.map_system.qr_detectado_persistente:
+                    self.estado = "escaneo"
 
             # Renderizar el frame usando el ARRenderer
             frame, self.last_avatar_bbox = self.ar_renderer.render(
                 frame,
-                self.guia_activo,
+                self.estado,
                 self.paso,
                 self.max_pasos,
                 self.activos,
@@ -476,7 +584,11 @@ class App: # Renombrado de VisorTurismoAR a App
                 self.trivia_system.trivia_opciones,
                 self.trivia_system.trivia_opciones_fase2,
                 self.trivia_system.trivia_errores,
-                self.trivia_system.trivia_acierto
+                self.trivia_system.trivia_acierto,
+                self.puzzle_system,
+                self.ayuda_activa,
+                self.ronda_completada,
+                self.sitio_actual_id # Pasar sitio_actual_id al renderizador
             )
             cv2.imshow("VISOR_TURISMO_AR", frame) # Mostrar el frame final
             self.animation_manager.anim_frame += 1 # Incremento global para todas las animaciones

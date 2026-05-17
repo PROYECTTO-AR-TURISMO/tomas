@@ -14,6 +14,7 @@ class UIManager:
         self.img_pregunta = load_ui_asset('pregunta.png', self.base_dir)
         self.avatar_5 = load_ui_asset('avatar_5.png', self.base_dir)
         self.bg_opciones_1 = load_ui_asset('fondo_opciones.png', self.base_dir)
+        self.avatar_6 = load_ui_asset('avatar_6.png', self.base_dir) # Nuevo avatar para el escáner
         self.bg_opciones_2 = load_ui_asset('fondo_opciones_2.png', self.base_dir)
         self.img_escaner = load_ui_asset('fondo_escaner.png', self.base_dir)
 
@@ -29,6 +30,35 @@ class UIManager:
         self.btn_tienda = load_ui_asset('shop.png', self.base_dir)
         self.btn_moneda = load_ui_asset('coin.png', self.base_dir)
 
+    def draw_welcome_screen(self, frame, w_f, h_f, mouse_x, mouse_y, animation_manager):
+        """Dibuja una interfaz de bienvenida elegante con efecto glassmorphism."""
+        # Fondo oscurecido
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w_f, h_f), (0, 0, 0), -1)
+        frame = cv2.addWeighted(overlay, 0.7, frame, 0.3, 0)
+
+        # Dibujar Avatar de Bienvenida (Lado izquierdo)
+        if self.avatar_5 is not None:
+            frame = render_alfa(frame, self.avatar_5, 0.02, 0.10, 0.75)
+
+        # Panel de información con glassmorphism
+        apply_glassmorphism(frame, int(w_f*0.35), int(h_f*0.35), int(w_f*0.9), int(h_f*0.65), blur_strength=20, alpha=0.4, border_radius=20)
+        
+        frame = dibujar_texto_utf8(frame, "BIENVENIDO A MONTERÍA AR", (int(w_f*0.4), int(h_f*0.40)), 17, (255, 255, 255))
+        frame = dibujar_texto_utf8(frame, "Disfruta de una experiencia AR a través\nde la historia de Montería", (int(w_f*0.35), int(h_f*0.48)), 18, (220, 220, 220))
+
+        # Botón Comenzar (Abajo a la derecha)
+        btn_x1, btn_y1 = int(w_f * 0.7), int(h_f * 0.8)
+        btn_x2, btn_y2 = int(w_f * 0.98), int(h_f * 0.95)
+        
+        is_hover = btn_x1 < mouse_x < btn_x2 and btn_y1 < mouse_y < btn_y2
+        color_btn = (0, 220, 0) if is_hover else (0, 150, 0)
+        
+        draw_rounded_rect(frame, (btn_x1, btn_y1), (btn_x2, btn_y2), color_btn, 15, -1, alpha=0.9)
+        draw_rounded_rect(frame, (btn_x1, btn_y1), (btn_x2, btn_y2), (255, 255, 255), 15, 2)
+        frame = dibujar_texto_utf8(frame, "SIGUIENTE", (btn_x1 + 45, btn_y1 + 25), 16, (255, 255, 255))
+        return frame
+
     def draw_hud(self, frame, w_f, h_f, paso, max_pasos, monedas, mouse_x, mouse_y, animation_manager):
         # Dibujar Viñeta Cinematográfica (Bordes oscuros)
         self._draw_vignette(frame, w_f, h_f)
@@ -41,6 +71,11 @@ class UIManager:
         coin_x2, coin_y2 = int(w_f * 0.15), int(h_f * 0.065)
         draw_rounded_rect(frame, (coin_x1, coin_y1), (coin_x2, coin_y2), (50, 50, 50), 20, -1, alpha=0.4) # Fondo
         draw_rounded_rect(frame, (coin_x1, coin_y1), (coin_x2, coin_y2), (150, 150, 150), 20, 2) # Borde
+
+        # Botón Ayuda (?)
+        help_hover = self.is_hovering_help_button(mouse_x, mouse_y, w_f, h_f)
+        draw_rounded_rect(frame, (int(w_f*0.8), int(h_f*0.015)), (int(w_f*0.85), int(h_f*0.065)), (150, 150, 150) if help_hover else (80, 80, 80), 10, -1, alpha=0.5)
+        frame = dibujar_texto_utf8(frame, "?", (int(w_f*0.815), int(h_f*0.02)), 20, (255, 255, 255))
 
         if self.btn_moneda is not None:
             frame = render_alfa(frame, self.btn_moneda, (coin_x1 + 5)/w_f, (coin_y1 + 5)/h_f, 0.025)
@@ -122,7 +157,7 @@ class UIManager:
         # Texto del paso actual
         frame = dibujar_texto_utf8(frame, f"PASO {paso}/{max_pasos}", (bar_x + bar_width + 20, bar_y + 5), 18, (255, 255, 255))
 
-    def draw_navigation_buttons(self, frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, animation_manager):
+    def draw_navigation_buttons(self, frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, animation_manager, show_next=True):
         # LÓGICA DE INTERACTIVIDAD DE BOTONES
         hover_sig = mouse_x > w_f * 0.7 and mouse_y > h_f * 0.75
         hover_back = mouse_x < w_f * 0.18 and mouse_y > h_f * 0.75
@@ -136,7 +171,7 @@ class UIManager:
         # Aplicar efecto de "levante" y escalar dinámicamente según la pantalla
         target_h_nav = h_f * 0.16 # 16% de la altura de la pantalla (botones más grandes)
 
-        if self.btn_sig is not None and paso != 5:
+        if self.btn_sig is not None and show_next:
             base_scale = target_h_nav / self.btn_sig.shape[0]
             y_btn = 0.8 - (0.03 * animation_manager.hover_sig_anim)
             esc_btn = base_scale + (0.02 * animation_manager.hover_sig_anim)
@@ -147,7 +182,7 @@ class UIManager:
             esc_btn = 0.18 + (0.02 * animation_manager.hover_back_anim)
             frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
 
-        if self.btn_salt is not None and paso != 5:
+        if self.btn_salt is not None and show_next:
             base_scale = (target_h_nav / self.btn_salt.shape[0]) * 1.25
             y_btn = 0.78 - (0.03 * animation_manager.hover_salt_anim)
             esc_btn = base_scale + (0.02 * animation_manager.hover_salt_anim)
@@ -215,7 +250,7 @@ class UIManager:
 
         return frame
 
-    def draw_trivia_phase1(self, frame, w_f, h_f, trivia_opciones, trivia_errores, trivia_acierto, mouse_x, mouse_y):
+    def draw_trivia_phase1(self, frame, w_f, h_f, trivia_opciones, trivia_errores, trivia_acierto, mouse_x, mouse_y, override_avatar=None):
         # 1. Imagen de fondo (Alineada a la derecha, más pequeña)
         if self.bg_opciones_1 is not None:
             target_h_bg = h_f * 0.65
@@ -231,8 +266,9 @@ class UIManager:
             x_img, y_img, w_img, h_img = w_f * 0.35, h_f * 0.1, w_f * 0.6, h_f * 0.8
 
         # 2. Imagen del avatar (Izquierda)
-        if self.avatar_5 is not None:
-            frame = render_alfa(frame, self.avatar_5, 0.02, 0.20, 0.6)
+        av_img = override_avatar if override_avatar is not None else self.avatar_5
+        if av_img is not None:
+            frame = render_alfa(frame, av_img, 0.02, 0.20, 0.6)
         
         # 3. Lógica de renderizado de las casillas en el lado derecho del mapa
         for i, anio in enumerate(trivia_opciones):
@@ -272,12 +308,18 @@ class UIManager:
             cv2.putText(frame, texto_anio, (x_text, y_text), font, font_scale, (0, 0, 0), thickness)
         return frame
 
-    def draw_trivia_phase2(self, frame, w_f, h_f, trivia_opciones_fase2, trivia_errores, trivia_acierto, mouse_x, mouse_y, animation_manager):
+    def draw_trivia_phase2(self, frame, w_f, h_f, trivia_opciones_fase2, trivia_errores, trivia_acierto, mouse_x, mouse_y, animation_manager, override_avatar=None):
         if self.img_pregunta is not None:
             scale_pregunta = 0.55
             w_preg_px = self.img_pregunta.shape[1] * scale_pregunta
             x_porc_preg = (w_f - w_preg_px) / 2 / w_f
             frame = render_alfa(frame, self.img_pregunta, x_porc_preg, 0.02, scale_pregunta)
+            
+        # 2. Imagen del avatar (Izquierda) - Ahora compatible con override_avatar en fase 2
+        av_img = override_avatar if override_avatar is not None else self.avatar_5
+        if av_img is not None:
+            frame = render_alfa(frame, av_img, 0.02, 0.20, 0.6)
+
             text_x = int(w_f * x_porc_preg + w_preg_px * 0.12)
             text_y = int(h_f * 0.02 + self.img_pregunta.shape[0] * scale_pregunta * 0.58)
             
@@ -333,3 +375,25 @@ class UIManager:
 
     def is_hovering_shop_button(self, mouse_x, mouse_y, w_f, h_f):
         return w_f * 0.85 < mouse_x < w_f * 0.98 and h_f * 0.01 < mouse_y < h_f * 0.15
+
+    def is_hovering_help_button(self, mouse_x, mouse_y, w_f, h_f):
+        """Detecta si el mouse está sobre el botón de ayuda (?) en la barra superior."""
+        return int(w_f*0.8) < mouse_x < int(w_f*0.85) and int(h_f*0.015) < mouse_y < int(h_f*0.065)
+
+    def draw_finish_site_button(self, frame, w_f, h_f, mouse_x, mouse_y):
+        """Dibuja un botón grande para finalizar el recorrido del sitio actual."""
+        bx1, by1 = int(w_f * 0.02), int(h_f * 0.70)
+        bx2, by2 = int(w_f * 0.55), int(h_f * 0.92)
+        
+        is_hover = bx1 < mouse_x < bx2 and by1 < mouse_y < by2
+        alpha = 0.9 if is_hover else 0.7
+        color = (0, 200, 0) if is_hover else (0, 150, 0)
+        
+        draw_rounded_rect(frame, (bx1, by1), (bx2, by2), color, 20, -1, alpha=alpha)
+        draw_rounded_rect(frame, (bx1, by1), (bx2, by2), (255, 255, 255), 20, 2)
+        
+        frame = dibujar_texto_utf8(frame, "VAMOS AL SIGUIENTE SITIO", (bx1 + 65, by1 + 45), 18, (255, 255, 255))
+        return frame
+
+    def is_hovering_finish_button(self, mouse_x, mouse_y, w_f, h_f):
+        return int(w_f * 0.02) < mouse_x < int(w_f * 0.55) and int(h_f * 0.70) < mouse_y < int(h_f * 0.92)

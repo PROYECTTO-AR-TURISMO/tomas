@@ -77,6 +77,7 @@ class GifHandler:
     def __init__(self, filepath):
         self.frames = []
         self.current_frame = 0
+        self.paused = False
         self.load_gif(filepath)
 
     def load_gif(self, filepath):
@@ -109,6 +110,8 @@ class GifHandler:
 
     def get_frame(self):
         if not self.frames: return None
+        if self.paused:
+            return self.frames[0]
         
         # Avanzar frame solo si no es el último (para que no se repita solo)
         if self.current_frame < len(self.frames) - 1:
@@ -193,7 +196,7 @@ class VisorTurismoAR:
         self.qr_last_seen_points = None # Para suavizado de movimiento
         self.sitios_turisticos = [ # Lista de sitios turísticos con sus propiedades
             {"id": "sitio1", "nombre": "Ronda del Sinú", "x_rel": 0.40, "y_rel": 0.25, "calibrated_manually": True}, # Posición ajustada y sin texto específico
-            {"id": "sitio2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
+            {"id": "sitio_2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
         ] # Se elimina "Pasaje del Sol"
         self.icon_anims = [0.0] * len(self.sitios_turisticos)
         self.img_pin = self._buscar_archivo_ui('pin.png')
@@ -357,19 +360,31 @@ class VisorTurismoAR:
         self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None, 'textos': {}, 'vaca_gif': None, 'iguana_gif': None}
         archivos = os.listdir(path_sitio)
         
+        # Ajustar cantidad de pasos y mapeo de archivos según el sitio
+        if sitio_id == 'sitio_2':
+            self.max_pasos = 2
+            self.max_pasos = 3
+        else:
+            self.max_pasos = 6
+
         for i in range(1, self.max_pasos + 1):
+            # Para sitio_2, el paso 1 usa el archivo 5 y el paso 2 el 6
+            file_num = i + 4 if sitio_id == 'sitio_2' else i
             # Buscar avatar con prioridad al atuendo actual
-            path_avatar = os.path.join(path_sitio, f"avatar_{i}.gif")
+            path_avatar = os.path.join(path_sitio, f"avatar_{file_num}.gif")
             if self.atuendo_actual != "original":
-                path_custom = os.path.join(self.base_dir, 'assets', 'outfits', self.atuendo_actual, f"avatar_{i}.gif")
+                path_custom = os.path.join(self.base_dir, 'assets', 'outfits', self.atuendo_actual, f"avatar_{file_num}.gif")
                 if os.path.exists(path_custom):
                     path_avatar = path_custom
             
             if os.path.exists(path_avatar):
-                self.activos['avatars'][i] = GifHandler(path_avatar)
+                handler = GifHandler(path_avatar)
+                if sitio_id == 'sitio_2' and file_num == 6:
+                    handler.paused = True
+                self.activos['avatars'][i] = handler
 
             for f in archivos:
-                if f.lower() == f"burbuja_{i}.gif":
+                if f.lower() == f"burbuja_{file_num}.gif":
                     self.activos['burbujas'][i] = GifHandler(os.path.join(path_sitio, f))
         
         if 'historica.png' in [f.lower() for f in archivos]:
@@ -761,7 +776,7 @@ class VisorTurismoAR:
                         img_a_usar = self.img_pin
                         if sitio['id'] == 'sitio1' and self.img_pin_parque is not None:
                             img_a_usar = self.img_pin_parque
-                        elif sitio['id'] == 'sitio2' and self.img_pin_iglesia is not None:
+                        elif sitio['id'] == 'sitio_2' and self.img_pin_iglesia is not None:
                             img_a_usar = self.img_pin_iglesia
 
                         if img_a_usar is not None:
@@ -809,6 +824,8 @@ class VisorTurismoAR:
                 
                 # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
                 if self.paso == 4 and self.activos.get('mapa_img') is not None:
+                # Activamos la lógica de mapa en el paso 4 (Sitio 1) o paso 3 (Sitio 2)
+                if (self.paso == 4 or (self.max_pasos == 3 and self.paso == 3)) and self.activos.get('mapa_img') is not None:
                     # Configuración de tiempos
                     duracion_caida = 40
                     duracion_materializacion = 30 # Materialización más rápida

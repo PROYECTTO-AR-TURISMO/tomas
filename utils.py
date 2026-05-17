@@ -9,6 +9,7 @@ class GifHandler:
     def __init__(self, filepath):
         self.frames = []
         self.current_frame = 0
+        self.paused = False
         self.load_gif(filepath)
 
     def load_gif(self, filepath):
@@ -37,6 +38,8 @@ class GifHandler:
 
     def get_frame(self):
         if not self.frames: return None
+        if self.paused:
+            return self.frames[0]
         if self.current_frame < len(self.frames) - 1:
             # Avanzamos 2 cuadros por ciclo para aumentar la velocidad (Velocidad x2)
             self.current_frame = min(len(self.frames) - 1, self.current_frame + 2)

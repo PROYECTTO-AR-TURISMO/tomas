@@ -220,7 +220,7 @@ class AnimationManager:
     def add_leaf_particles(self, x, y, count=1):
         for _ in range(count):
             color = (40, 100, 40) # Fallback verde
-            size = random.uniform(0.8, 2.2) # Aún más pequeñas para ser sutiles
+            size = random.uniform(0.3, 0.7) # Hojas más pequeñas solicitadas
             vx = random.uniform(5.0, 9.0)   # Velocidad base horizontal
             vy = random.uniform(-0.5, 0.5)  # Inclinación inicial leve
             life = random.randint(300, 500)

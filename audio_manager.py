@@ -91,7 +91,7 @@ class AudioManager:
             # Mapeo de sonidos según el sitio
             sonidos = {
                 "sitio1": "ronda_ambiente.mp3", # río, aves
-                "sitio2": "catedral_ambiente.mp3" # campanas, eco
+                "sitio_2": "catedral_ambiente.mp3" # campanas, eco
             }
             archivo = sonidos.get(sitio_id)
             if not archivo: return
