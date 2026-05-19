@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
-from utils import render_alfa, dibujar_texto_utf8, dibujar_sombra, apply_glassmorphism
+import pygame
+from utils import render_alfa, dibujar_texto_utf8, dibujar_sombra, apply_glassmorphism, draw_rounded_rect
 
 class ARRenderer:
     def __init__(self, base_dir, map_system, ui_manager, animation_manager):
@@ -14,9 +15,13 @@ class ARRenderer:
             print("Error: No se pudo abrir la cámara.")
             exit()
 
-    def render(self, frame, estado, paso, max_pasos, activos, animales_stampida, mouse_x, mouse_y, last_avatar_bbox, monedas, tienda_abierta, outfits_disponibles, outfits_comprados, atuendo_actual, trivia_fase, trivia_opciones, trivia_opciones_fase2, trivia_errores, trivia_acierto, puzzle_system, ayuda_activa, ronda_completada, sitio_actual_id):
+    def render(self, frame, estado, paso, max_pasos, activos, animales_stampida, mouse_x, mouse_y, last_avatar_bbox, monedas, tienda_abierta, marcos_disponibles, marcos_comprados, marco_actual, trivia_fase, trivia_opciones, trivia_opciones_fase2, trivia_errores, trivia_acierto, puzzle_system, planchon_system, ayuda_activa, progreso, sitio_actual_id, fps=0):
         h_f, w_f, _ = frame.shape
         guia_activo = (estado == "guia")
+
+        # --- MARCO DECORATIVO (CAPA DE FONDO) ---
+        # Se renderiza antes que cualquier otro elemento para que siempre esté en los bordes y por debajo.
+        frame = self.ui_manager.draw_decorative_frame(frame, marco_actual, self.animation_manager)
 
         if estado == "bienvenida":
             return self.ui_manager.draw_welcome_screen(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager), None
@@ -37,21 +42,20 @@ class ARRenderer:
             frame = dibujar_texto_utf8(frame, self.animation_manager.cinematic_name, (int(w_f*0.02), int(h_f*0.10)), 25, (255,255,255))
 
         if self.map_system.modo_seleccion:
-            frame = self.map_system.render_map_animation(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager.anim_frame, self.animation_manager, ronda_completada) # Pasa ronda_completada
+            frame = self.map_system.render_map_animation(frame, w_f, h_f, mouse_x, mouse_y, self.animation_manager.anim_frame, self.animation_manager, progreso)
             # Texto instructivo superior con nuevo mensaje y color negro
-            txt_mapa = "¿cual es el siguiente sitio?" if ronda_completada else "selecciona el primer sitio turistico para desbloquear los otros"
-            txt_zoom = "Usa la rueda del mouse o dos dedos para hacer zoom" if ronda_completada else ""
+            s1_completado = progreso.get('s1', False)
+            txt_mapa = "¿cual es el siguiente sitio?" if s1_completado else "selecciona el primer sitio turistico para desbloquear los otros" # This text remains
             
-            tw = max(cv2.getTextSize(txt_mapa, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0][0],
-                    cv2.getTextSize(txt_zoom, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0][0])
-            
-            box_w = tw + 45
-            bx1 = 10 # Movemos el recuadro al extremo izquierdo
-            box_h = 100 if ronda_completada else 80
-            apply_glassmorphism(frame, bx1, 35, bx1 + box_w, 35 + box_h, blur_strength=15, alpha=0.3, border_radius=10)
-            frame = dibujar_texto_utf8(frame, txt_mapa, (bx1 + 15, 42), 20, (0, 0, 0))
-            if txt_zoom:
-                frame = dibujar_texto_utf8(frame, txt_zoom, (bx1 + 15, 75), 14, (50, 50, 50))
+            if s1_completado:
+                # Solo dibujamos el texto en pantalla si ya se completó el sitio 1
+                tw = cv2.getTextSize(txt_mapa, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0][0]
+                box_w, box_h = tw + 45, 65
+                bx1 = (w_f - box_w) // 2
+                by1 = h_f - box_h - 25
+                apply_glassmorphism(frame, bx1, by1, bx1 + box_w, by1 + box_h, blur_strength=15, alpha=0.3, border_radius=15)
+                frame = dibujar_texto_utf8(frame, txt_mapa, (bx1 + 22, by1 + 15), 20, (0, 0, 0))
+
             last_avatar_bbox = None # No hay avatar visible en modo selección
         elif not guia_activo:
             # Avatar de bienvenida durante el escaneo (Lado Izquierdo)
@@ -65,9 +69,23 @@ class ARRenderer:
         else:
             last_avatar_bbox = None # Resetear en cada frame para evitar clics fantasma
             
+            # Lógica para determinar si el avatar y la burbuja han terminado su discurso/animación
+            is_finished = True
+            # 1. Verificar si el audio (TTS) sigue ocupado
+            if pygame.mixer.get_init() and pygame.mixer.Channel(1).get_busy():
+                is_finished = False
+            # 2. Verificar si la burbuja de texto sigue animándose
+            bu_anim = activos.get('burbujas', {}).get(paso)
+            if bu_anim and bu_anim.frames and bu_anim.current_frame < len(bu_anim.frames) - 1:
+                is_finished = False
+            # 3. Verificar si el avatar sigue animándose
+            av_anim = activos.get('avatars', {}).get(paso)
+            if av_anim and av_anim.frames and av_anim.current_frame < len(av_anim.frames) - 1:
+                is_finished = False
+
             # ------ INICIO LÓGICA PASO 4 (MAPA 3D) ------
-            # En sitio_2 (max_pasos=4), el mapa aparece en el paso 3. En otros, en el paso 4.
-            if (paso == 4 and sitio_actual_id == 'sitio1') or (sitio_actual_id == 'sitio_2' and paso == 3):
+            # Sitio 1: Paso 4 | Sitio 2 y 3: Paso 3
+            if (paso == 4 and sitio_actual_id == 'sitio1') or (paso == 3 and sitio_actual_id in ['sitio_2', 'sitio_3']):
                 duracion_caida = 40
                 fall_prog = min(self.animation_manager.anim_frame / duracion_caida, 1.0)
 
@@ -111,25 +129,33 @@ class ARRenderer:
                     except:
                         pass
 
-                # Seleccionar la imagen que emerge del mapa (Prioridad a foto_h en sitio 2 paso 3)
-                img_pop = activos.get('foto_h') if (sitio_actual_id == 'sitio_2' and paso == 3) else activos.get('pop_up_img')
+                # --- SELECCIÓN INTELIGENTE DE ACTIVO (SITIO 1, 2 Y 3) ---
+                # Priorizamos foto_h para los sitios históricos (2 y 3) en su paso de transición
+                if sitio_actual_id in ['sitio_2', 'sitio_3'] and paso == 3:
+                    img_pop = activos.get('foto_h') if activos.get('foto_h') is not None else activos.get('pop_up_img')
+                else:
+                    img_pop = activos.get('pop_up_img')
 
                 if fall_prog >= 1.0 and img_pop is not None:
                     pop_prog = min((self.animation_manager.anim_frame - duracion_caida) / 30.0, 1.0)
                     flotacion = np.sin(self.animation_manager.anim_frame * 0.1) * 0.02
                     
-                    if sitio_actual_id == 'sitio_2' and paso == 3:
-                        # Trayectoria: Emerge del centro y termina en la esquina (0.10, 0.10) igual que sitio 1
-                        esc_pop = 0.3 * pop_prog
-                        x_pop = 0.40 - (0.30 * pop_prog)
-                        y_pop = 0.50 - (0.40 * pop_prog) + flotacion
-                    else:
-                        # Comportamiento estándar para pop-ups del mapa
-                        esc_pop = 0.4 * pop_prog
-                        y_pop = 0.6 - (0.3 * pop_prog) + flotacion + (0.05 * self.animation_manager.hover_mapa_anim)
-                        x_pop = 0.45 - (0.35 * pop_prog)
+                    # --- ANIMACIÓN CINEMATOGRÁFICA (FADE + SCALE + GLOW) ---
+                    img_to_render = img_pop.copy()
+                    # Aplicar Fade suave manipulando el canal alfa
+                    if img_to_render.shape[2] == 4:
+                        img_to_render[:, :, 3] = (img_to_render[:, :, 3] * pop_prog).astype(np.uint8)
                     
-                    frame = render_alfa(frame, img_pop, x_pop, y_pop, esc_pop)
+                    # Trayectoria unificada para todos los sitios: emerge del mapa en diagonal a la izquierda
+                    esc_pop = 0.4 * pop_prog
+                    x_pop = 0.42 - (0.35 * pop_prog)
+                    y_pop = 0.6 - (0.3 * pop_prog) + flotacion + (0.05 * self.animation_manager.hover_mapa_anim)
+                    
+                    # Ahora que x_pop y y_pop están definidos, añadir partículas de glow
+                    if 0.1 < pop_prog < 0.2:
+                        self.animation_manager.add_pin_glow_particles(w_f * x_pop, h_f * y_pop, 2)
+
+                    frame = render_alfa(frame, img_to_render, x_pop, y_pop, esc_pop)
             # ------ FIN LÓGICA PASO 4 ------
 
             # --- RENDERIZADO DEL SUELÓN (PASO 2) ---
@@ -182,7 +208,8 @@ class ARRenderer:
                     esc = 0.7
                     w_esc, h_esc = int(w_orig * esc), int(h_orig * esc)
                     
-                    x_porc = (w_f - w_esc) / (2.0 * w_f) if paso == 1 else (0.20 if paso == 2 else 0.40)
+                    # Se ajusta x_porc para el paso 2 de 0.20 a 0.32 para no tapar el botón de saltar
+                    x_porc = (w_f - w_esc) / (2.0 * w_f) if paso == 1 else (0.32 if paso == 2 else 0.40)
                     y_porc = 0.35
 
                     # --- LÓGICA DE CAÍDA Y POLVO ---
@@ -217,10 +244,10 @@ class ARRenderer:
                         target_bubble_scale = 0.9
                         # Eliminamos e_scale para que la burbuja no crezca, sino que aparezca a tamaño real
                         e_scale = 1.0 
-                        # Ajuste específico para el final de los sitios (paso 6 o paso 4 en sitio 2)
+                        # Ajuste específico para el final de los sitios (paso 6 en sitio 1, paso 5 en sitio 2 y 3)
                         es_final = (paso == max_pasos)
-                        x_bu = x_porc + 0.12 if es_final else x_porc
-                        y_bu = y_porc_final - 0.46 if es_final else y_porc_final - 0.42
+                        x_bu = x_porc # Alineado con el avatar
+                        y_bu = y_porc_final - 0.42 
                         frame = render_alfa(frame, bu.get_frame(), x_bu, y_bu, target_bubble_scale)
 
             # --- RENDERIZADO DE INTERFAZ DE TRIVIA (PASO 5) ---
@@ -259,29 +286,54 @@ class ARRenderer:
                     tw, th = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 1.2, 3)[0]
                     apply_glassmorphism(frame, w_f//2 - tw//2 - 20, h_f//2 - th//2 - 20, w_f//2 + tw//2 + 20, h_f//2 + th//2 + 20)
                     frame = dibujar_texto_utf8(frame, msg, (w_f//2 - tw//2, h_f//2 - th//2), 30, (0, 255, 0))
+            
+            # --- RENDERIZADO DEL MINIJUEGO DE PLANCHONES (SITIO 3) ---
+            if sitio_actual_id == 'sitio_3' and paso == 4:
+                # Delegamos el renderizado completo al sistema especializado
+                frame = planchon_system.dibujar(frame, self.animation_manager.anim_frame, self.animation_manager)
 
             # Se muestra la foto histórica al final (paso 6) en el sitio 1, pero se quita en el sitio 2 paso 5 por petición
             if paso == max_pasos and activos['foto_h'] is not None and sitio_actual_id != 'sitio_2':
                 frame = render_alfa(frame, activos['foto_h'], 0.10, 0.10, 0.3)
 
-            # --- BOTÓN DE FINALIZACIÓN (SITIO 1, PASO 6) ---
-            if paso == 6 and activos.get('avatars').get(6) is not None and sitio_actual_id == 'sitio1':
+            # --- BOTÓN DE FINALIZACIÓN (APARECE AL FINAL DE CADA SITIO) ---
+            es_fin_s1 = (paso == 6 and sitio_actual_id == 'sitio1')
+            es_fin_s2 = (paso == 5 and sitio_actual_id == 'sitio_2')
+            es_fin_s3 = (paso == 5 and sitio_actual_id == 'sitio_3')
+
+            # Si es el final del sitio y ya terminó de hablar, mostramos el botón de salida
+            if (es_fin_s1 or es_fin_s2 or es_fin_s3) and is_finished:
                 frame = self.ui_manager.draw_finish_site_button(frame, w_f, h_f, mouse_x, mouse_y)
             else:
                 # --- RENDERIZADO DE BOTONES DE NAVEGACIÓN ---
                 show_next = True
+                # REGLA: El botón de siguiente NO SALE hasta que terminen los GIFs y el Audio
+                if not is_finished:
+                    show_next = False # Ocultar "Siguiente" hasta que termine la animación/audio
+
                 # Ocultar "Siguiente" en Trivia de Sitio 1, Puzzle incompleto de Sitio 2, o en cualquier paso de Felicitaciones
                 if sitio_actual_id == 'sitio1' and paso == 5: show_next = False
                 if sitio_actual_id == 'sitio_2' and paso == 4 and not puzzle_system.completado: show_next = False
+                if sitio_actual_id == 'sitio_3' and paso == 4 and not planchon_system.completado: show_next = False
                 if paso == max_pasos: show_next = False
                 
-                frame = self.ui_manager.draw_navigation_buttons(frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, self.animation_manager, show_next)
+                show_back = True
+                if sitio_actual_id == 'sitio_3' and paso == 4 and not planchon_system.completado:
+                    show_back = False
+                frame = self.ui_manager.draw_navigation_buttons(frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, self.animation_manager, show_next, show_back)
 
             # --- INTERFAZ GLOBAL (MONEDAS Y TIENDA) ---
             frame = self.ui_manager.draw_hud(frame, w_f, h_f, paso, max_pasos, monedas, mouse_x, mouse_y, self.animation_manager)
 
             # Siempre llamamos a draw_shop_menu para permitir la animación de entrada y salida (slide)
-            frame = self.ui_manager.draw_shop_menu(frame, w_f, h_f, outfits_disponibles, outfits_comprados, atuendo_actual, self.animation_manager, mouse_x, mouse_y, tienda_abierta, monedas)
+            frame = self.ui_manager.draw_shop_menu(frame, w_f, h_f, marcos_disponibles, marcos_comprados, marco_actual, self.animation_manager, mouse_x, mouse_y, tienda_abierta, monedas)
+
+        # --- PROFILER PROFESIONAL ---
+        if fps > 0:
+            debug_txt = f"FPS: {fps:.1f} | MEM: {len(self.animation_manager.particles)} P | ST: {sitio_actual_id}"
+            # Caja pequeña y minimalista
+            apply_glassmorphism(frame, w_f-220, h_f-35, w_f-10, h_f-5, blur_strength=5, alpha=0.5, border_radius=5)
+            dibujar_texto_utf8(frame, debug_txt, (w_f-210, h_f-30), 12, (255, 255, 255))
 
         # Renderizar partículas
         self.animation_manager.render_particles(frame)

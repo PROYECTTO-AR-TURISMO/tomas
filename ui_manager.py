@@ -30,6 +30,11 @@ class UIManager:
         self.btn_tienda = load_ui_asset('shop.png', self.base_dir)
         self.btn_moneda = load_ui_asset('coin.png', self.base_dir)
 
+        # Sistema de Caché para Marcos Decorativos
+        self.cache_marco_img = None
+        self.cache_res = (0, 0)
+        self.cache_id = ""
+
     def draw_welcome_screen(self, frame, w_f, h_f, mouse_x, mouse_y, animation_manager):
         """Dibuja una interfaz de bienvenida elegante con efecto glassmorphism."""
         # Fondo oscurecido
@@ -157,7 +162,7 @@ class UIManager:
         # Texto del paso actual
         frame = dibujar_texto_utf8(frame, f"PASO {paso}/{max_pasos}", (bar_x + bar_width + 20, bar_y + 5), 18, (255, 255, 255))
 
-    def draw_navigation_buttons(self, frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, animation_manager, show_next=True):
+    def draw_navigation_buttons(self, frame, w_f, h_f, paso, max_pasos, mouse_x, mouse_y, animation_manager, show_next=True, show_back=True):
         # LÓGICA DE INTERACTIVIDAD DE BOTONES
         hover_sig = mouse_x > w_f * 0.7 and mouse_y > h_f * 0.75
         hover_back = mouse_x < w_f * 0.18 and mouse_y > h_f * 0.75
@@ -177,12 +182,13 @@ class UIManager:
             esc_btn = base_scale + (0.02 * animation_manager.hover_sig_anim)
             frame = render_alfa(frame, self.btn_sig, 0.75, y_btn, esc_btn)
 
-        if self.btn_back is not None:
+        if self.btn_back is not None and show_back:
             y_btn = 0.8 - (0.03 * animation_manager.hover_back_anim)
             esc_btn = 0.18 + (0.02 * animation_manager.hover_back_anim)
             frame = render_alfa(frame, self.btn_back, 0.05, y_btn, esc_btn)
 
-        if self.btn_salt is not None and show_next:
+        # El botón de saltar información aparece siempre que esté disponible el activo
+        if self.btn_salt is not None:
             base_scale = (target_h_nav / self.btn_salt.shape[0]) * 1.25
             y_btn = 0.78 - (0.03 * animation_manager.hover_salt_anim)
             esc_btn = base_scale + (0.02 * animation_manager.hover_salt_anim)
@@ -190,7 +196,7 @@ class UIManager:
         
         return frame
 
-    def draw_shop_menu(self, frame, w_f, h_f, outfits_disponibles, outfits_comprados, atuendo_actual, animation_manager, mouse_x, mouse_y, tienda_abierta, monedas):
+    def draw_shop_menu(self, frame, w_f, h_f, marcos_disponibles, marcos_comprados, marco_actual, animation_manager, mouse_x, mouse_y, tienda_abierta, monedas):
         # Lógica de slide del panel desde la derecha
         if tienda_abierta:
             animation_manager.shop_panel_prog = min(1.0, animation_manager.shop_panel_prog + 0.1)
@@ -222,7 +228,7 @@ class UIManager:
         cv2.line(frame, (close_x - d, close_y - d), (close_x + d, close_y + d), (255, 255, 255), 2)
         cv2.line(frame, (close_x + d, close_y - d), (close_x - d, close_y + d), (255, 255, 255), 2)
 
-        for i, outfit in enumerate(outfits_disponibles):
+        for i, outfit in enumerate(marcos_disponibles):
             y_box = 100 + i * 110 + animation_manager.shop_scroll_y
             is_hover = x1 + 20 < mouse_x < w_f - 20 and y_box < mouse_y < y_box + 100
             
@@ -233,9 +239,9 @@ class UIManager:
             card_color = (80, 80, 80) if not is_hover else (120, 100, 60)
             draw_rounded_rect(frame, (x1 + 20, y_box), (w_f - 20, y_box + 90), card_color, 15, -1, alpha=0.6)
             
-            comprado = outfit["id"] in outfits_comprados
+            comprado = outfit["id"] in marcos_comprados
             
-            if outfit["id"] == atuendo_actual:
+            if outfit["id"] == marco_actual:
                 status = "[PUESTO]"
                 price_color = (0, 255, 0) # Green
             elif comprado:
@@ -248,6 +254,44 @@ class UIManager:
             frame = dibujar_texto_utf8(frame, outfit["nombre"], (x1 + 40, y_box + 15), 18, (255, 255, 255))
             frame = dibujar_texto_utf8(frame, status, (x1 + 40, y_box + 45), 16, price_color)
 
+        return frame
+
+    def draw_decorative_frame(self, frame, marco_id, animation_manager):
+        """Renderiza el marco decorativo con optimización de caché y transición."""
+        if marco_id == "ninguno" and animation_manager.frame_transition_alpha <= 0:
+            return frame
+
+        h_f, w_f = frame.shape[:2]
+        
+        # Si cambió el marco o la resolución, actualizar caché
+        if self.cache_id != marco_id or self.cache_res != (w_f, h_f):
+            self.cache_id = marco_id
+            self.cache_res = (w_f, h_f)
+            
+            if marco_id == "ninguno":
+                self.cache_marco_img = None
+            else:
+                img_path = f"marco_{marco_id}.png"
+                img_raw = load_ui_asset(img_path, self.base_dir)
+                if img_raw is not None:
+                    # Asegurar que el marco tenga canal alfa para evitar errores en la animación de fade
+                    if len(img_raw.shape) == 2: img_raw = cv2.cvtColor(img_raw, cv2.COLOR_GRAY2BGRA)
+                    elif img_raw.shape[2] == 3: img_raw = cv2.cvtColor(img_raw, cv2.COLOR_BGR2BGRA)
+                    # Escalado de alta calidad para cubrir exactamente las dimensiones de la pantalla del dispositivo
+                    self.cache_marco_img = cv2.resize(img_raw, (w_f, h_f), interpolation=cv2.INTER_AREA)
+                else:
+                    self.cache_marco_img = None
+
+        if self.cache_marco_img is not None:
+            alpha_val = animation_manager.frame_transition_alpha
+            if alpha_val > 0:
+                # Mezcla directa sobre toda la pantalla para asegurar que el marco cubra los bordes exactos
+                # Esto evita que el marco se vea "en la mitad" o mal escalado
+                alpha_mask = (self.cache_marco_img[:, :, 3] / 255.0) * alpha_val
+                alpha_mask = alpha_mask[:, :, np.newaxis] # Preparar para broadcasting
+                
+                frame[:] = (alpha_mask * self.cache_marco_img[:, :, :3] + (1.0 - alpha_mask) * frame).astype(np.uint8)
+                
         return frame
 
     def draw_trivia_phase1(self, frame, w_f, h_f, trivia_opciones, trivia_errores, trivia_acierto, mouse_x, mouse_y, override_avatar=None):

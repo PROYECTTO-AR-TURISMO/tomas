@@ -96,6 +96,9 @@ class AnimationManager:
         self.button_pulses = [] # Lista de (x, y, r, alpha)
         self.shop_scroll_y = 0 # Desplazamiento vertical del menú
         
+        # Animación de Marco Decorativo
+        self.frame_transition_alpha = 1.0 # 0.0 a 1.0
+
         # Cargar asset de hoja
         self.leaf_img = load_ui_asset('hoja.png', base_dir) if base_dir else None
 
@@ -116,6 +119,8 @@ class AnimationManager:
         self._update_cinematic()
         self._update_ui_anims()
         self._update_particles()
+        # Suavizar transición del marco
+        self.frame_transition_alpha = min(1.0, self.frame_transition_alpha + 0.05)
         self._generate_ambient_particles(show_leaves)
 
     def _generate_ambient_particles(self, show_leaves):

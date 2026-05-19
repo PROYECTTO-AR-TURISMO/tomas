@@ -21,16 +21,21 @@ class MapSystem:
         self.target_zoom = 1.0
         self.qr_anchor_points = None 
         self.qr_last_seen_points = None # Para suavizado de movimiento
+        self.detector = cv2.QRCodeDetector()
         
         self.sitios_turisticos = [ # Lista de sitios turísticos con sus propiedades
-            {"id": "sitio1", "nombre": "Ronda del Sinú", "x_rel": 0.40, "y_rel": 0.25, "calibrated_manually": True}, # Posición ajustada y sin texto específico
-            {"id": "sitio_2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45}, # Catedral mantiene su posición
+            {"id": "sitio1", "nombre": "Ronda del Sinú", "x_rel": 0.40, "y_rel": 0.25, "calibrated_manually": True, "unlock_condition": None}, # Siempre desbloqueado
+            {"id": "sitio_2", "nombre": "Catedral", "x_rel": 0.55, "y_rel": 0.45, "unlock_condition": "s1_completado"}, # Desbloqueado al completar sitio 1
+            {"id": "sitio_3", "nombre": "Planchones", "x_rel": 0.18, "y_rel": 0.20, "unlock_condition": "s2_completado"}, # Desbloqueado al completar sitio 2
         ]
+        self.progreso = {} # Para almacenar el estado de completado de los sitios
         self.icon_anims = [0.0] * len(self.sitios_turisticos) # Control de fade-in para iconos
         
         self.img_pin = load_ui_asset('pin.png', self.base_dir)
         self.img_pin_parque = load_ui_asset('pin_parque.png', self.base_dir)
         self.img_pin_iglesia = load_ui_asset('pin_iglesia.png', self.base_dir)
+        self.img_pin_barco = load_ui_asset('pin_barco.png', self.base_dir) # Nuevo icono solicitado
+        self.img_lock = load_ui_asset('lock.png', self.base_dir) # Icono de candado para sitios bloqueados
 
         # Validación de activos para ayudarte a debuguear
         if self.img_pin_parque is None: print("  [AVISO] No se encontró 'pin_parque.png' en assets/ui/")
@@ -68,11 +73,28 @@ class MapSystem:
         except Exception as e:
             print(f"  [AVISO] No se pudo auto-calibrar el mapa por OCR: {e}")
 
+    def update_progreso(self, progreso_dict):
+        """Actualiza el diccionario de progreso de los sitios."""
+        self.progreso = progreso_dict
+
     def update_qr_detection(self, frame, guia_activo):
-        """Detecta QR y actualiza el estado del mapa."""
-        detector = cv2.QRCodeDetector()
-        data, points, _ = detector.detectAndDecode(frame)
+        """Detecta QR y actualiza el estado del mapa de forma robusta."""
+        data, points = "", None
         
+        try:
+            # Separamos detección de decodificación para validar los puntos
+            # y evitar el crash interno de OpenCV cuando el área detectada es 0
+            hay_qr, points_candidate = self.detector.detect(frame)
+            
+            if hay_qr and points_candidate is not None:
+                # Solo procedemos si el área del contorno es válida (> 0) para evitar el crash
+                if cv2.contourArea(points_candidate) > 0:
+                    data, _ = self.detector.decode(frame, points_candidate)
+                    points = points_candidate
+        except cv2.error:
+            # Silenciamos errores internos de la librería para mantener la estabilidad
+            data, points = "", None
+
         if points is not None and len(points) > 0:
             self.qr_anchor_points = points[0]
             
@@ -89,11 +111,14 @@ class MapSystem:
                 self.modo_seleccion = True
                 self.anim_mapa_progreso = 0.0
                 self.icon_anims = [0.0] * len(self.sitios_turisticos)
-        else:
+        elif not self.modo_seleccion: # Permitir que el mapa sea interactivo aunque se pierda el QR si ya se abrió
             self.qr_detectado_persistente = False
 
-    def render_map_animation(self, frame, w_f, h_f, mouse_x, mouse_y, anim_frame, animation_manager, ronda_completada):
+    def render_map_animation(self, frame, w_f, h_f, mouse_x, mouse_y, anim_frame, animation_manager, progreso):
         """Renderiza el mapa con comportamiento dual: AR con QR al inicio, 2D estable con zoom al completar."""
+        ronda_completada = progreso.get('s1', False)
+        s2_completado = progreso.get('s2', False)
+
         if self.modo_seleccion:
             # Control de animación de aparición
             if self.qr_detectado_persistente:
@@ -158,17 +183,34 @@ class MapSystem:
                 current_scale = 1.0
 
             # --- PINES Y LÍNEAS ---
-            if self.anim_mapa_progreso > 0.6 and self.mapa_matrix is not None:
-                # Dibujar línea
-                p1_src = np.array([[[self.sitios_turisticos[0]['x_rel'] * w_m, self.sitios_turisticos[0]['y_rel'] * h_m]]], dtype=np.float32)
-                p2_src = np.array([[[self.sitios_turisticos[1]['x_rel'] * w_m, self.sitios_turisticos[1]['y_rel'] * h_m]]], dtype=np.float32)
-                p1_dst = cv2.perspectiveTransform(p1_src, self.mapa_matrix)[0][0]
-                p2_dst = cv2.perspectiveTransform(p2_src, self.mapa_matrix)[0][0]
+            if self.anim_mapa_progreso > 0.6 and self.mapa_matrix is not None and self.progreso:
+                # Almacenar puntos de los sitios para dibujar líneas
+                sitio_coords = {}
+                for sitio in self.sitios_turisticos:
+                    pt_src = np.array([[[sitio['x_rel'] * w_m, sitio['y_rel'] * h_m]]], dtype=np.float32)
+                    pt_dst = cv2.perspectiveTransform(pt_src, self.mapa_matrix)[0][0]
+                    sitio_coords[sitio['id']] = pt_dst
+
+                # Dibujar líneas entre sitios (Gris bloqueado, Verde desbloqueado)
+                if 'sitio1' in sitio_coords and 'sitio_2' in sitio_coords:
+                    color_s1_s2 = (0, 255, 0) if self.progreso.get('s1_completado', False) else (150, 150, 150)
+                    cv2.line(frame, tuple(sitio_coords['sitio1'].astype(int)), tuple(sitio_coords['sitio_2'].astype(int)), color_s1_s2, 2, cv2.LINE_AA)
                 
-                cv2.line(frame, tuple(p1_dst.astype(int)), tuple(p2_dst.astype(int)), (0, 255, 0) if ronda_completada else (150, 150, 150), 2, cv2.LINE_AA)
+                if 'sitio_2' in sitio_coords and 'sitio_3' in sitio_coords:
+                    color_s2_s3 = (0, 255, 0) if self.progreso.get('s2_completado', False) else (150, 150, 150)
+                    cv2.line(frame, tuple(sitio_coords['sitio_2'].astype(int)), tuple(sitio_coords['sitio_3'].astype(int)), color_s2_s3, 2, cv2.LINE_AA)
 
                 for i, sitio in enumerate(self.sitios_turisticos):
-                    esta_bloqueado = (sitio['id'] == 'sitio_2' and not ronda_completada)
+                    # Lógica de bloqueo progresivo
+                    esta_bloqueado = False
+                    if sitio['unlock_condition'] is not None:
+                        if not self.progreso.get(sitio['unlock_condition'], False):
+                            esta_bloqueado = True
+                    
+                    # El sitio 1 siempre está desbloqueado
+                    if sitio['id'] == 'sitio1':
+                        esta_bloqueado = False
+
                     if self.anim_mapa_progreso > (0.6 + i * 0.05):
                         self.icon_anims[i] = min(1.0, self.icon_anims[i] + 0.1)
 
@@ -185,13 +227,23 @@ class MapSystem:
                     dist = np.sqrt((mouse_x - px)**2 + (mouse_y - py_f)**2)
                     esc_pin = (0.15 if dist < 40 else 0.10) * current_scale
                     
-                    img_a_usar = self.img_pin_parque if sitio['id'] == 'sitio1' else self.img_pin_iglesia
-                    if esta_bloqueado:
-                        img_a_usar = cv2.cvtColor(img_a_usar, cv2.COLOR_BGRA2GRAY)
-                        img_a_usar = cv2.cvtColor(img_a_usar, cv2.COLOR_GRAY2BGRA)
+                    if sitio['id'] == 'sitio1': img_a_usar = self.img_pin_parque
+                    elif sitio['id'] == 'sitio_2': img_a_usar = self.img_pin_iglesia
+                    else: img_a_usar = self.img_pin_barco
+
+                    if esta_bloqueado and img_a_usar is not None:
+                        # Convertir el icono a escala de grises para mostrarlo "sin color"
+                        b, g, r, a = cv2.split(img_a_usar)
+                        gray = cv2.cvtColor(cv2.merge([b, g, r]), cv2.COLOR_BGR2GRAY)
+                        img_a_usar = cv2.merge([gray, gray, gray, a])
 
                     dibujar_sombra(frame, px, py, int(25 * esc_pin * 10), int(8 * esc_pin * 10))
                     frame = render_alfa(frame, img_a_usar, (px/w_f) - (0.2*esc_pin), (py_f/h_f) - (0.5*esc_pin), esc_pin)
+                    
+                    # Dibujar candado si está bloqueado
+                    if esta_bloqueado and self.img_lock is not None:
+                        esc_lock = esc_pin * 0.4
+                        frame = render_alfa(frame, self.img_lock, (px/w_f), (py_f/h_f) - (0.45*esc_pin), esc_lock)
                     
                     txt = "[BLOQUEADO]" if esta_bloqueado else sitio['nombre']
                     frame = dibujar_texto_utf8(frame, txt, (int(px - 50 * current_scale), int(py_f + 15 * current_scale)), int(14 * current_scale), (255,255,255))

@@ -5,13 +5,13 @@ class ShopSystem:
         self.base_dir = base_dir
         self.monedas = 0
         self.tienda_abierta = False
-        self.atuendo_actual = "original"
-        self.outfits_comprados = ["original"]
+        self.marco_actual = "ninguno"
+        self.marcos_comprados = ["ninguno"]
         self.outfits_disponibles = [
-            {"id": "original", "nombre": "Original", "precio": 0},
-            {"id": "elegante", "nombre": "De Gala", "precio": 100},
-            {"id": "explorador", "nombre": "Monteriano", "precio": 150},
-            {"id": "pupi", "nombre": "Pupi", "precio": 200}
+            {"id": "ninguno", "nombre": "Sin Marco", "precio": 0},
+            {"id": "iguana", "nombre": "Marco Iguana", "precio": 100},
+            {"id": "ardilla", "nombre": "Marco Ardilla", "precio": 150},
+            {"id": "perezoso", "nombre": "Marco Perezoso", "precio": 200}
         ]
 
         # Cargar icono de tienda

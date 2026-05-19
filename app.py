@@ -16,6 +16,7 @@ from shop_system import ShopSystem
 from ui_manager import UIManager
 from ar_renderer import ARRenderer
 from puzzle_system import PuzzleSystem
+from planchon_system import PlanchonSystem
 
 # Configuraciones de OCR para Windows
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
@@ -35,6 +36,7 @@ class App: # Renombrado de VisorTurismoAR a App
         self.shop_system = ShopSystem(self.base_dir)
         self.ui_manager = UIManager(self.base_dir)
         self.puzzle_system = PuzzleSystem()
+        self.planchon_system = PlanchonSystem(self.base_dir)
         self.ar_renderer = ARRenderer(self.base_dir, self.map_system, self.ui_manager, self.animation_manager)
 
         # Variables de estado de la aplicación
@@ -44,7 +46,9 @@ class App: # Renombrado de VisorTurismoAR a App
         self.paso = 1
         self.max_pasos = 6
         self.activos = {'avatars': {}, 'burbujas': {}, 'foto_h': None}
-        self.ronda_completada = False # Estado de progresión global
+        self.s1_completado = False # Ronda del Sinú
+        self.s2_completado = False # Catedral
+        self.s3_completado = False # Planchones
         self.animales_stampida = [] # Lista para manejar la estampida del paso 2
         
         # Inicializar variables de mouse
@@ -58,6 +62,53 @@ class App: # Renombrado de VisorTurismoAR a App
         self.running = True
         # Inicializar la música de fondo
         self.audio_manager.iniciar_musica_fondo()
+        self.map_system.update_progreso({'s1': self.s1_completado, 's2': self.s2_completado, 's3': self.s3_completado, 's1_completado': self.s1_completado, 's2_completado': self.s2_completado})
+
+    def abrir_mapa(self, forzar_abierto=False):
+        """Centraliza la apertura del mapa y la instrucción por voz."""
+        self.guia_activo = False
+        self.estado = "mapa"
+        self.map_system.modo_seleccion = True
+        self.map_system.update_progreso({'s1': self.s1_completado, 's2': self.s2_completado, 's3': self.s3_completado, 's1_completado': self.s1_completado, 's2_completado': self.s2_completado})
+        if forzar_abierto:
+            self.map_system.anim_mapa_progreso = 1.0
+        txt = "¿cual es el siguiente sitio?" if self.s1_completado else "selecciona el primer sitio turistico para desbloquear los otros"
+        self.audio_manager.tts.decir(txt)
+
+    def is_step_finished(self):
+        """Comprueba si el audio del paso, la burbuja y el avatar han terminado."""
+        # Verificar audio (Canal 1 es el TTS)
+        if pygame.mixer.get_init() and pygame.mixer.Channel(1).get_busy():
+            return False
+        # Verificar burbuja
+        bu = self.activos.get('burbujas', {}).get(self.paso)
+        if bu and bu.frames:
+            if bu.current_frame < len(bu.frames) - 1:
+                return False
+        # Verificar avatar
+        av = self.activos.get('avatars', {}).get(self.paso)
+        if av and av.frames:
+            if av.current_frame < len(av.frames) - 1:
+                return False
+        return True
+
+    def saltar_informacion(self):
+        """Finaliza inmediatamente la reproducción de audio y animaciones del paso actual."""
+        # 1. Detener audio del Canal 1 (TTS)
+        if pygame.mixer.get_init():
+            pygame.mixer.Channel(1).stop()
+        print(f"[DEBUG] Saltar Información: Deteniendo audio y forzando fin de GIFs para paso {self.paso}")
+        
+        # 2. Forzar el último frame en el avatar y la burbuja para que is_step_finished() sea True
+        av = self.activos.get('avatars', {}).get(self.paso)
+        if av and av.frames:
+            av.current_frame = len(av.frames) - 1
+            
+        bu = self.activos.get('burbujas', {}).get(self.paso)
+        if bu and bu.frames:
+            bu.current_frame = len(bu.frames) - 1
+        
+        # Después de esto, is_step_finished() debería retornar True en el siguiente ciclo de renderizado.
 
     def cargar_activos_sitio(self, texto_qr):
         sitio_id = texto_qr.strip().lower()
@@ -74,6 +125,9 @@ class App: # Renombrado de VisorTurismoAR a App
         # Ajustar cantidad de pasos y mapeo de archivos según el sitio
         if sitio_id == 'sitio_2':
             self.max_pasos = 5 # Ahora son 5 pasos (Intro, Estampida, Mapa, Puzzle, Felicitaciones)
+        elif sitio_id == 'sitio_3':
+            self.max_pasos = 5 # Intro (8), Historia 1 (9), Historia 2 (9.2), Planchón, Felicitaciones (10)
+            self.planchon_system.reset()
         else:
             self.max_pasos = 6
 
@@ -82,30 +136,49 @@ class App: # Renombrado de VisorTurismoAR a App
         self.puzzle_system.piezas = []
 
         for i in range(1, self.max_pasos + 1):
-            # Para sitio_2, el paso 1 usa el archivo 5 y el paso 2 el 6
-            file_num = i + 4 if sitio_id == 'sitio_2' else i
+            # Lógica de asignación de nombres de archivo según el sitio
+            es_ultimo_paso = (i == self.max_pasos)
             
-            # Identificar nombres de archivos (Especial para felicitaciones al final de cada sitio)
-            es_ultimo_paso = (sitio_id == 'sitio1' and i == 6) or (sitio_id == 'sitio_2' and i == 5)
-            nombre_av = "avatar_felicitaciones.gif" if es_ultimo_paso else f"avatar_{file_num}.gif"
-            nombre_bu = "burbuja_felicitaciones.gif" if es_ultimo_paso else f"burbuja_{file_num}.gif"
+            if sitio_id == 'sitio_3':
+                if i == 1: nombre_av, nombre_bu = "avatar_8.gif", "burbuja_8.gif"
+                elif i == 2: nombre_av, nombre_bu = "avatar_9.gif", "burbuja_9.gif"
+                elif i == 3: nombre_av, nombre_bu = "avatar_9.gif", "burbuja_9.2.gif"
+                elif i == 4: nombre_av, nombre_bu = "", "" # Sin avatar durante el juego
+                elif es_ultimo_paso: nombre_av, nombre_bu = "avatar_10.gif", "burbuja_10.gif"
+                else: nombre_av, nombre_bu = "", ""
+            else:
+                # Para sitio_2, el paso 1 usa el archivo 5 y el paso 2 el 6
+                file_num = i + 4 if sitio_id == 'sitio_2' else i
+                
+                # Identificar nombres de archivos (Especial para felicitaciones al final de cada sitio)
+                nombre_av = "avatar_felicitaciones.gif" if es_ultimo_paso else f"avatar_{file_num}.gif"
+                nombre_bu = "burbuja_felicitaciones.gif" if es_ultimo_paso else f"burbuja_{file_num}.gif"
 
-            # Buscar avatar con prioridad al atuendo actual
-            path_avatar = os.path.join(path_sitio, nombre_av)
-            if self.shop_system.atuendo_actual != "original":
-                path_custom = os.path.join(self.base_dir, 'assets', 'outfits', self.shop_system.atuendo_actual, nombre_av)
-                if os.path.exists(path_custom):
-                    path_avatar = path_custom
-            
+            if not nombre_av: continue
+
+            # Buscar avatar de forma insensible a mayúsculas y permitiendo nombres alternativos
+            nombre_av_real = next((f for f in archivos if f.lower() == nombre_av.lower() or (es_ultimo_paso and f.lower() == "avatar_felicitaciones.gif")), None)
+            if not nombre_av_real: continue
+
+            path_avatar = os.path.join(path_sitio, nombre_av_real)
             if os.path.exists(path_avatar):
                 handler = GifHandler(path_avatar)
-                if sitio_id == 'sitio_2' and file_num == 6:
-                    handler.paused = True
-                self.activos['avatars'][i] = handler
+                if handler.frames: # Solo añadir si se cargaron frames correctamente
+                    if sitio_id == 'sitio_2' and i == 2:
+                        handler.paused = True
+                    self.activos['avatars'][i] = handler
+                else:
+                    print(f"  [WARNING] GifHandler no pudo cargar frames para el avatar: {path_avatar}")
 
+            # Búsqueda flexible de la burbuja
+            nombre_bu_real = next((f for f in archivos if f.lower() == nombre_bu.lower() or (es_ultimo_paso and f.lower() == "burbuja_felicitaciones.gif")), nombre_bu)
             for f in archivos:
-                if f.lower() == nombre_bu.lower():
-                    self.activos['burbujas'][i] = GifHandler(os.path.join(path_sitio, f))
+                if f.lower() == nombre_bu_real.lower():
+                    burbuja_handler = GifHandler(os.path.join(path_sitio, f))
+                    if burbuja_handler.frames: # Solo añadir si se cargaron frames correctamente
+                        self.activos['burbujas'][i] = burbuja_handler
+                    else:
+                        print(f"  [WARNING] GifHandler no pudo cargar frames para la burbuja: {os.path.join(path_sitio, f)}")
         
         # Búsqueda flexible de la foto histórica (soporta .png, .jpg, .jpeg y mayúsculas)
         foto_h_file = next((f for f in archivos if f.lower().startswith('historica.')), None)
@@ -160,8 +233,8 @@ class App: # Renombrado de VisorTurismoAR a App
             img = cv2.imread(os.path.join(path_sitio, mapa_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
             self.activos['mapa_img'] = img
-        elif sitio_id == 'sitio_2':
-            # Si no hay mapa específico en la carpeta del sitio 2, usamos el mapa general como pidió el usuario
+        elif sitio_id in ['sitio_2', 'sitio_3']:
+            # Si no hay mapa específico, usamos el mapa general para la animación 3D
             self.activos['mapa_img'] = self.map_system.img_mapa_general
 
         # Generar máscara compleja de materialización (H, V, Diag, Ruido) si hay un mapa cargado (específico o general)
@@ -182,6 +255,9 @@ class App: # Renombrado de VisorTurismoAR a App
         else:
             self.activos['mapa_mask'] = None
 
+        # Búsqueda de pop-up: Soporta 'pop_up' estándar o 'planchonantes' para el sitio 3
+        pop_up_file = next((f for f in archivos if (f.lower().startswith('pop_up.') or f.lower().startswith('planchonantes.') or f.lower().startswith('planchon.')) 
+                           and f.lower().endswith(('.png', '.jpg', '.jpeg'))), None)
         if pop_up_file:
             img = cv2.imread(os.path.join(path_sitio, pop_up_file), cv2.IMREAD_UNCHANGED)
             if img is not None and len(img.shape) == 3 and img.shape[2] == 3: img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
@@ -258,6 +334,7 @@ class App: # Renombrado de VisorTurismoAR a App
         self.animation_manager.hover_trivia_anims_2 = [0.0, 0.0, 0.0, 0.0]
         self.animation_manager.hover_mapa_anim = 0.0
         self.animales_stampida = []
+        self.planchon_system.activo = (self.sitio_actual_id == 'sitio_3' and self.paso == 4)
         
         for handler in list(self.activos['avatars'].values()) + list(self.activos['burbujas'].values()):
             handler.current_frame = 0
@@ -272,12 +349,50 @@ class App: # Renombrado de VisorTurismoAR a App
         # Actualizar posición del mouse siempre
         self.mouse_x, self.mouse_y = x, y
 
+        # --- 1. GESTIÓN DE LA TIENDA (BLOQUEO DE CAPAS) ---
+        if self.shop_system.tienda_abierta:
+            if event == cv2.EVENT_LBUTTONDOWN:
+                panel_w = 300
+                offset_x = 0 # Asumimos panel abierto
+                x1 = w_f - panel_w
+                # Botón Cerrar (X)
+                if np.sqrt((x - (w_f - 40))**2 + (y - 40)**2) < 20:
+                    self.shop_system.tienda_abierta = False
+                    return
+                # Clic fuera del panel
+                if x < x1:
+                    self.shop_system.tienda_abierta = False
+                    return
+                # Clic en items
+                for i, outfit in enumerate(self.shop_system.outfits_disponibles):
+                    y_box = 100 + i * 110 + self.animation_manager.shop_scroll_y
+                    if x1 + 20 < x < w_f - 20 and y_box < y < y_box + 90:
+                        if outfit["id"] in self.shop_system.marcos_comprados:
+                            self.shop_system.marco_actual = outfit["id"]
+                            self.animation_manager.frame_transition_alpha = 0.0
+                        elif self.shop_system.monedas >= outfit["precio"]:
+                            self.shop_system.monedas -= outfit["precio"]
+                            self.shop_system.marcos_comprados.append(outfit["id"])
+                            self.shop_system.marco_actual = outfit["id"]
+                            self.animation_manager.frame_transition_alpha = 0.0
+                        return
+            # Bloquear cualquier otro evento si la tienda está abierta
+            if event == cv2.EVENT_MOUSEWHEEL:
+                delta = 45 if flags > 0 else -45
+                self.animation_manager.shop_scroll_y = min(0, self.animation_manager.shop_scroll_y + delta)
+            return
+
         if self.estado == "bienvenida":
             if event == cv2.EVENT_LBUTTONDOWN:
                 # Botón "Comenzar" abajo a la derecha
                 if (w_f*0.7 < x < w_f*0.98) and (h_f*0.8 < y < h_f*0.95):
                     self.animation_manager.start_transition()
                     self.estado = "escaneo"
+            return
+
+        # Botones HUD Globales
+        if event == cv2.EVENT_LBUTTONDOWN and self.ui_manager.is_hovering_shop_button(x, y, w_f, h_f):
+            self.shop_system.tienda_abierta = True
             return
 
         # Botón de Ayuda (HUD)
@@ -294,22 +409,25 @@ class App: # Renombrado de VisorTurismoAR a App
             if self.sitio_actual_id == 'sitio_2' and self.paso == 4 and self.puzzle_system.activo:
                 # Detectar si ya hay una pieza en movimiento antes de procesar
                 was_dragging = self.puzzle_system.selected_piece is not None
+                fue_completado = self.puzzle_system.completado
                 self.puzzle_system.manejar_mouse(event, x, y)
+
+                # Recompensa por completar el rompecabezas de la Catedral
+                if not fue_completado and self.puzzle_system.completado:
+                    self.shop_system.add_coins(300) # Recompensa por el puzzle
+                    self.animation_manager.add_coin_particles(x, y, 30)
+
                 # Si se está arrastrando o se acaba de seleccionar, bloqueamos otros clics
                 if was_dragging or self.puzzle_system.selected_piece is not None:
                     return
 
-        # NUEVO: Lógica de scroll con la rueda del mouse para la tienda
+        # Interacción para el minijuego de planchones (Sitio 3, Paso 4)
+        if event in [cv2.EVENT_LBUTTONDOWN, cv2.EVENT_MOUSEMOVE, cv2.EVENT_LBUTTONUP] and self.guia_activo:
+            if self.sitio_actual_id == 'sitio_3' and self.paso == 4:
+                self.planchon_system.manejar_mouse(event, x / w_f, y / h_f)
+
         if event == cv2.EVENT_MOUSEWHEEL:
-            if self.shop_system.tienda_abierta:
-                # flags > 0 es scroll hacia arriba, flags < 0 hacia abajo
-                delta = 45 if flags > 0 else -45
-                self.animation_manager.shop_scroll_y += delta
-                # Calcular el límite del scroll basado en el contenido
-                content_h = 100 + len(self.shop_system.outfits_disponibles) * 110
-                min_scroll = min(0, h_f - content_h - 50)
-                self.animation_manager.shop_scroll_y = max(min_scroll, min(0, self.animation_manager.shop_scroll_y))
-            elif self.map_system.modo_seleccion and self.ronda_completada:
+            if self.map_system.modo_seleccion and self.s1_completado:
                 # Permitir zoom en el mapa si la ronda 1 terminó
                 delta = 0.1 if flags > 0 else -0.1
                 self.map_system.target_zoom = max(0.5, min(2.5, self.map_system.target_zoom + delta))
@@ -331,11 +449,11 @@ class App: # Renombrado de VisorTurismoAR a App
 
                 # Área de detección aumentada para que responda al primer intento
                 if np.sqrt((x - px)**2 + (y - py)**2) < 70 and not self.animation_manager.cinematic_active:
-                    # Bloqueo lógico: Si es la catedral y no se ha completado la ronda
-                    if sitio['id'] == 'sitio_2' and not self.ronda_completada:
-                        self.audio_manager.tts.decir("Primero completa la actividad en la Ronda del Sinú")
-                        self.animation_manager.add_button_pulse(x, y)
-                        return
+                    esta_bloqueado = False
+                    if sitio['unlock_condition'] is not None:
+                        if not self.map_system.progreso.get(sitio['unlock_condition'], False):
+                            esta_bloqueado = True
+                    if esta_bloqueado: return
 
                     self.animation_manager.add_button_pulse(x, y)
                     self.animation_manager.start_cinematic(sitio['nombre'])
@@ -347,23 +465,38 @@ class App: # Renombrado de VisorTurismoAR a App
                         self.estado = "guia"
                         self.guia_activo = True
                         self._cambiar_paso(1)
-                    return
+            return
 
+        # --- DETECCIÓN DE CLIC EN EL AVATAR (FUERA DEL MODO SELECCIÓN) ---
+        if event == cv2.EVENT_LBUTTONDOWN and self.last_avatar_bbox:
+            ax, ay, aw, ah = self.last_avatar_bbox
+            # Evitamos que el clic en el avatar interfiera con la zona de navegación inferior (y > 70%)
+            if ax < x < ax + aw and ay < y < ay + ah and y < h_f * 0.70:
+                av_handler = self.activos['avatars'].get(self.paso)
+                if av_handler:
+                    av_handler.current_frame = 0 # Reiniciar animación del GIF
+                    av_handler.spawn_timer = 0   # Reiniciar caída
+                    av_handler.dust_done = False
+                bu_handler = self.activos['burbujas'].get(self.paso)
+                if bu_handler:
+                    bu_handler.current_frame = 0
+                    self.reproducir_texto_paso() # Volver a reproducir el audio
+                return
+
+        # --- INTERACCIONES DE GUÍA (FUERA DEL MODO SELECCIÓN) ---
         if event == cv2.EVENT_LBUTTONDOWN and self.guia_activo:
-            # --- DETECCIÓN DE BOTÓN "VAMOS AL SIGUIENTE SITIO" (Paso 6, Sitio 1) ---
-            if self.paso == 6 and self.sitio_actual_id == 'sitio1':
-                if self.ui_manager.is_hovering_finish_button(x, y, w_f, h_f):
-                    self.ronda_completada = True
-                    self.guia_activo = False
-                    self.estado = "mapa"
-                    self.map_system.modo_seleccion = True
-                    self.map_system.anim_mapa_progreso = 1.0 # Empezar con mapa abierto
+            # 1. Botón de Finalización de Sitio
+            if self.ui_manager.is_hovering_finish_button(x, y, w_f, h_f) and self.is_step_finished():
+                if self.paso == self.max_pasos:
+                    if self.sitio_actual_id == 'sitio1': self.s1_completado = True
+                    elif self.sitio_actual_id == 'sitio_2': self.s2_completado = True
+                    elif self.sitio_actual_id == 'sitio_3': self.s3_completado = True
+                    self.abrir_mapa(forzar_abierto=True)
                     return
 
-            # --- LÓGICA DE NAVEGACIÓN (PRIORIDAD MÁXIMA PARA EVITAR BLOQUEOS) ---
-            if y > h_f * 0.75:
-                # Botón Atrás
-                if x < w_f * 0.18: 
+            # 2. Botones de Navegación (Siguiente / Atrás / Saltar)
+            if y > h_f * 0.70: # Margen más amplio para detección
+                if x < w_f * 0.18: # Botón Atrás
                     if self.paso > 1:
                         if self.paso == 5 and self.trivia_system.trivia_fase == 2:
                             self.trivia_system.trivia_fase = 1
@@ -371,87 +504,21 @@ class App: # Renombrado de VisorTurismoAR a App
                         else:
                             self._cambiar_paso(self.paso - 1)
                     return
-                # Botón Siguiente (Derecha)
-                elif x > w_f * 0.7:
-                    # Bloqueos: Trivia (S1-P5), Puzzle incompleto (S2-P4) o Paso Final
-                    if (self.sitio_actual_id == 'sitio1' and self.paso == 5) or \
-                       (self.sitio_actual_id == 'sitio_2' and self.paso == 4 and not self.puzzle_system.completado) or \
-                       (self.paso == self.max_pasos):
-                        return
-
-                    if self.paso == self.max_pasos:
-                        # Si completamos el último paso de la Ronda, desbloqueamos la Catedral
-                        if self.sitio_actual_id == 'sitio1':
-                            self.ronda_completada = True
-                        self.guia_activo = False
-                        self.map_system.modo_seleccion = True
-                        self.map_system.anim_mapa_progreso = 0.0
-                    else:
-                        self._cambiar_paso(self.paso + 1)
+                elif x > w_f * 0.7: # Botón Siguiente
+                    print("[DEBUG] Clic en botón Siguiente")
+                    if self.is_step_finished():
+                        # Validar que no estemos en un minijuego incompleto
+                        if (self.sitio_actual_id == 'sitio1' and self.paso == 5) or \
+                           (self.sitio_actual_id == 'sitio_2' and self.paso == 4 and not self.puzzle_system.completado) or \
+                           (self.sitio_actual_id == 'sitio_3' and self.paso == 4 and not self.planchon_system.completado):
+                            return
+                        if self.paso < self.max_pasos:
+                            self._cambiar_paso(self.paso + 1)
                     return
-                # Botón Saltar
-                elif 0.18 * w_f <= x < 0.38 * w_f:
-                    if (self.sitio_actual_id == 'sitio1' and self.paso == 5) or \
-                       (self.sitio_actual_id == 'sitio_2' and self.paso == 4 and not self.puzzle_system.completado) or \
-                       (self.paso == self.max_pasos):
-                        return
-                    self._cambiar_paso(self.max_pasos)
+                elif 0.18 * w_f <= x < 0.38 * w_f: # Botón Saltar Información
+                    print("[DEBUG] Clic en botón Saltar Información")
+                    self.saltar_informacion()
                     return
-
-            # --- DETECCIÓN DE CLIC EN EL AVATAR ---
-            if self.last_avatar_bbox:
-                ax, ay, aw, ah = self.last_avatar_bbox
-                if ax < x < ax + aw and ay < y < ay + ah:
-                    av_handler = self.activos['avatars'].get(self.paso)
-                    if av_handler:
-                        av_handler.current_frame = 0 # Reiniciar animación del GIF
-                        av_handler.spawn_timer = 0   # Reiniciar caída
-                        av_handler.dust_done = False # Resetear polvo
-                    
-                    # También reiniciamos la burbuja de texto si existe
-                    bu_handler = self.activos['burbujas'].get(self.paso)
-                    if bu_handler:
-                        bu_handler.current_frame = 0
-                        
-                        self.reproducir_texto_paso() # Volver a reproducir el audio
-                    return # Consumir el evento de clic para evitar que se procese como un clic de botón
-
-
-            # Botón Tienda (Arriba a la derecha, ajustado para el nuevo tamaño)
-            if self.ui_manager.is_hovering_shop_button(x, y, w_f, h_f):
-                self.shop_system.tienda_abierta = not self.shop_system.tienda_abierta
-                return
-
-            if self.shop_system.tienda_abierta:
-                # Lógica de clics dentro del menú de la tienda
-                panel_w = 300
-                x1 = w_f - panel_w
-
-                # NUEVO: Cerrar si se presiona el botón X (coordenadas: w_f - 40, 40)
-                if np.sqrt((x - (w_f - 40))**2 + (y - 40)**2) < 20:
-                    self.shop_system.tienda_abierta = False
-                    return
-
-                # Cerrar la tienda si se hace clic fuera del panel (a la izquierda de x1)
-                if x < x1:
-                    self.shop_system.tienda_abierta = False
-                    return
-
-                for i, outfit in enumerate(self.shop_system.outfits_disponibles):
-                    y_box = 100 + i * 110 + self.animation_manager.shop_scroll_y
-                    if x1 + 20 < x < w_f - 20 and y_box < y < y_box + 90:
-                        if outfit["id"] in self.shop_system.outfits_comprados:
-                            # Seleccionar atuendo ya comprado
-                            self.shop_system.atuendo_actual = outfit["id"]
-                            if self.sitio_actual_id: self.cargar_activos_sitio(self.sitio_actual_id)
-                        elif self.shop_system.monedas >= outfit["precio"]:
-                            # Comprar nuevo atuendo
-                            self.shop_system.monedas -= outfit["precio"]
-                            self.shop_system.outfits_comprados.append(outfit["id"])
-                            self.shop_system.atuendo_actual = outfit["id"]
-                            if self.sitio_actual_id: self.cargar_activos_sitio(self.sitio_actual_id)
-                        return
-                return
 
             # --- Lógica de Juego (Paso 5) ---
             if self.sitio_actual_id == 'sitio1' and self.paso == 5 and self.trivia_system.trivia_fase == 1:
@@ -516,6 +583,17 @@ class App: # Renombrado de VisorTurismoAR a App
                             self.audio_manager.tts.decir("Ese no es el nombre correcto. Intenta de nuevo.")
                         return
 
+    def update_logic(self, mouse_y_rel):
+        """Actualiza lógica de minijuegos."""
+        if self.sitio_actual_id == 'sitio_3' and self.paso == 4:
+            # Actualizar física del planchón
+            fue_completado = self.planchon_system.completado
+            self.planchon_system.actualizar(self.animation_manager)
+
+            if not fue_completado and self.planchon_system.completado:
+                self.shop_system.add_coins(self.planchon_system.obtener_recompensa())
+                self.animation_manager.add_coin_particles(self.mouse_x, self.mouse_y, 20)
+
     def run(self):
         window_name = "VISOR_TURISMO_AR"
         cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
@@ -551,6 +629,9 @@ class App: # Renombrado de VisorTurismoAR a App
                 for animal in self.animales_stampida:
                     animal['x'] += animal['s']
 
+            # Lógica del planchón
+            self.update_logic(self.mouse_y / h_f)
+
             # Actualizar estado de los gestores
             self.animation_manager.update(self.mouse_x, self.mouse_y, show_leaves=self.guia_activo)
 
@@ -558,7 +639,7 @@ class App: # Renombrado de VisorTurismoAR a App
             if self.estado in ["escaneo", "mapa"]:
                 self.map_system.update_qr_detection(frame, self.guia_activo)
                 if self.map_system.modo_seleccion and self.estado == "escaneo":
-                    self.estado = "mapa"
+                    self.abrir_mapa(forzar_abierto=False)
                 
                 # Si el mapa se cerró por perder el QR, volvemos al estado de escaneo
                 if self.estado == "mapa" and self.map_system.anim_mapa_progreso <= 0 and not self.map_system.qr_detectado_persistente:
@@ -578,16 +659,17 @@ class App: # Renombrado de VisorTurismoAR a App
                 self.shop_system.monedas,
                 self.shop_system.tienda_abierta,
                 self.shop_system.outfits_disponibles,
-                self.shop_system.outfits_comprados,
-                self.shop_system.atuendo_actual,
+                self.shop_system.marcos_comprados, # Se cambió de 'outfits_comprados'
+                self.shop_system.marco_actual,     # Se cambió de 'atuendo_actual'
                 self.trivia_system.trivia_fase,
                 self.trivia_system.trivia_opciones,
                 self.trivia_system.trivia_opciones_fase2,
                 self.trivia_system.trivia_errores,
                 self.trivia_system.trivia_acierto,
                 self.puzzle_system,
+                self.planchon_system,
                 self.ayuda_activa,
-                self.ronda_completada,
+                {'s1': self.s1_completado, 's2': self.s2_completado, 's3': self.s3_completado},
                 self.sitio_actual_id # Pasar sitio_actual_id al renderizador
             )
             cv2.imshow("VISOR_TURISMO_AR", frame) # Mostrar el frame final

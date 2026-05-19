@@ -49,28 +49,28 @@ class GifHandler:
 def render_alfa(fondo, img, x_porcentaje, y_porcentaje, escala):
     if img is None or escala <= 0: return fondo
     try:
-        if len(img.shape) == 3 and img.shape[2] == 3:
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2BGRA)
-            
         h_f, w_f = fondo.shape[:2]
-        img_res = cv2.resize(img, None, fx=escala, fy=escala, interpolation=cv2.INTER_AREA)
+        # Optimizamos: Usar INTER_LINEAR si la escala es > 1, INTER_AREA si es < 1
+        interp = cv2.INTER_AREA if escala < 1.0 else cv2.INTER_LINEAR
+        img_res = cv2.resize(img, None, fx=escala, fy=escala, interpolation=interp)
         h, w, c = img_res.shape
         
-        x = int(w_f * x_porcentaje)
-        y = int(h_f * y_porcentaje)
-        
+        x, y = int(w_f * x_porcentaje), int(h_f * y_porcentaje)
         x1, y1 = max(0, x), max(0, y)
         x2, y2 = min(w_f, x + w), min(h_f, y + h)
-        
         if x1 >= x2 or y1 >= y2: return fondo
         
         img_rec = img_res[y1-y:y2-y, x1-x:x2-x]
-        region_fondo = fondo[y1:y2, x1:x2]
-        
-        alpha = img_rec[:, :, 3] / 255.0
-        for canal in range(3):
-            region_fondo[:, :, canal] = (alpha * img_rec[:, :, canal] + 
-                                        (1.0 - alpha) * region_fondo[:, :, canal])
+
+        # VECTORIZACIÓN NUMPY (Sustituye el loop for lento) con chequeo de canal alfa
+        if img_rec.shape[2] == 4:
+            alpha = (img_rec[:, :, 3] / 255.0)[:, :, np.newaxis]
+            blended = (alpha * img_rec[:, :, :3] + (1.0 - alpha) * fondo[y1:y2, x1:x2]).astype(np.uint8)
+            fondo[y1:y2, x1:x2] = blended
+        else:
+            # Si no hay canal alfa, copiamos la imagen directamente
+            fondo[y1:y2, x1:x2] = img_rec[:, :, :3]
+
         return fondo
     except Exception as e:
         return fondo
